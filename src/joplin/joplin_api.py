@@ -171,6 +171,71 @@ class JoplinNote:
             logger.error(f"Error creating JoplinNote: {e}")
             raise
 
+@dataclass
+class JoplinNotebook:
+    """Represents a Joplin notebook (folder)."""
+
+    id: str
+    title: str
+    parent_id: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+    user_created_time: datetime | None = None
+    user_updated_time: datetime | None = None
+    is_shared: bool = False
+    share_id: str | None = None
+    children: list["JoplinNotebook"] | None = None
+
+    @classmethod
+    def from_api_response(cls, data: dict[str, Any]) -> "JoplinNotebook":
+        """Create a JoplinNotebook instance from API response data."""
+        try:
+            logger.debug(f"Creating JoplinNotebook from API data: {data}")
+
+            if "id" not in data or "title" not in data:
+                msg = f"Missing essential fields (id/title) in API response: {data}"
+                raise ValueError(msg)
+
+            created_time = (
+                datetime.fromtimestamp(data["created_time"] / 1000)
+                if data.get("created_time")
+                else None
+            )
+            updated_time = (
+                datetime.fromtimestamp(data["updated_time"] / 1000)
+                if data.get("updated_time")
+                else None
+            )
+            user_created_time = (
+                datetime.fromtimestamp(data["user_created_time"] / 1000)
+                if data.get("user_created_time")
+                else None
+            )
+            user_updated_time = (
+                datetime.fromtimestamp(data["user_updated_time"] / 1000)
+                if data.get("user_updated_time")
+                else None
+            )
+
+            return cls(
+                id=data["id"],
+                title=data["title"],
+                parent_id=data.get("parent_id"),
+                created_time=created_time,
+                updated_time=updated_time,
+                user_created_time=user_created_time,
+                user_updated_time=user_updated_time,
+                is_shared=bool(data.get("is_shared", False)),
+                share_id=data.get("share_id"),
+                children=[
+                    cls.from_api_response(child)
+                    for child in data.get("children", [])
+                ],
+            )
+        except Exception as e:
+            logger.error(f"Error creating JoplinNotebook: {e}")
+            raise
+
 class JoplinAPI:
     """Client for the Joplin REST API.
 
@@ -395,3 +460,36 @@ class JoplinAPI:
             items=[JoplinNote.from_api_response(item) for item in response["items"]],
             has_more=response["has_more"]
         )
+
+    def list_notebooks(
+        self,
+        fields: list[str] | None = None
+    ) -> list[JoplinNotebook]:
+        """Get all notebooks as a tree."""
+        params = {}
+
+        if fields:
+            params["fields"] = ",".join(fields)
+
+        response = self._make_request("GET", "folders", params=params)
+
+        if isinstance(response, dict) and "items" in response:
+            items = response["items"]
+        else:
+            items = response
+
+        return [JoplinNotebook.from_api_response(item) for item in items]
+
+    def create_notebook(
+        self,
+        title: str,
+        parent_id: str | None = None
+    ) -> JoplinNotebook:
+        """Create a new notebook."""
+        data = {"title": title}
+
+        if parent_id is not None:
+            data["parent_id"] = parent_id
+
+        response = self._make_request("POST", "folders", json=data)
+        return JoplinNotebook.from_api_response(response)

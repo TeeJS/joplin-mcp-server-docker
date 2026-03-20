@@ -12,7 +12,7 @@ from pydantic import BaseModel
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.joplin.joplin_api import JoplinAPI, JoplinNote, OrderDirection
+from src.joplin.joplin_api import JoplinAPI, JoplinNotebook, JoplinNote, OrderDirection
 from src.joplin.joplin_utils import get_token_from_env, MarkdownContent
 
 # Initialize FastMCP server
@@ -44,6 +44,7 @@ class CreateNoteInput(BaseModel):
     title: str
     body: Optional[str] = None
     parent_id: Optional[str] = None
+    notebook_name: Optional[str] = None
     is_todo: Optional[bool] = False
 
 class UpdateNoteInput(BaseModel):
@@ -52,11 +53,85 @@ class UpdateNoteInput(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
     parent_id: Optional[str] = None
+    notebook_name: Optional[str] = None
     is_todo: Optional[bool] = None
 
 class ImportMarkdownInput(BaseModel):
     """Input parameters for importing markdown files."""
     file_path: str
+    notebook_name: Optional[str] = None
+    parent_id: Optional[str] = None
+
+
+class CreateNotebookInput(BaseModel):
+    """Input parameters for creating a notebook."""
+    title: str
+    parent_id: Optional[str] = None
+    parent_notebook_name: Optional[str] = None
+
+
+def serialize_notebook(notebook: JoplinNotebook) -> Dict[str, Any]:
+    """Serialize a notebook tree into an MCP-friendly structure."""
+    return {
+        "id": notebook.id,
+        "title": notebook.title,
+        "parent_id": notebook.parent_id,
+        "created_time": notebook.created_time.isoformat() if notebook.created_time else None,
+        "updated_time": notebook.updated_time.isoformat() if notebook.updated_time else None,
+        "user_created_time": notebook.user_created_time.isoformat() if notebook.user_created_time else None,
+        "user_updated_time": notebook.user_updated_time.isoformat() if notebook.user_updated_time else None,
+        "is_shared": notebook.is_shared,
+        "share_id": notebook.share_id,
+        "children": [serialize_notebook(child) for child in notebook.children or []],
+    }
+
+
+def iter_notebooks_with_paths(
+    notebooks: List[JoplinNotebook],
+    prefix: Optional[str] = None
+) -> List[tuple[JoplinNotebook, str]]:
+    """Flatten a notebook tree into notebook/path pairs."""
+    flattened = []
+
+    for notebook in notebooks:
+        path = f"{prefix}/{notebook.title}" if prefix else notebook.title
+        flattened.append((notebook, path))
+        flattened.extend(iter_notebooks_with_paths(notebook.children or [], path))
+
+    return flattened
+
+
+def resolve_notebook_id(parent_id: Optional[str], notebook_name: Optional[str]) -> Optional[str]:
+    """Resolve a destination notebook by ID or by exact title/path."""
+    if parent_id and notebook_name:
+        raise ValueError("Provide either parent_id or notebook_name, not both")
+
+    if parent_id:
+        return parent_id
+
+    if not notebook_name:
+        return None
+
+    notebooks = api.list_notebooks()
+    flattened = iter_notebooks_with_paths(notebooks)
+
+    path_matches = [(notebook, path) for notebook, path in flattened if path == notebook_name]
+    if len(path_matches) == 1:
+        return path_matches[0][0].id
+    if len(path_matches) > 1:
+        matches = ", ".join(path for _, path in path_matches)
+        raise ValueError(f"Notebook path '{notebook_name}' is ambiguous: {matches}")
+
+    title_matches = [(notebook, path) for notebook, path in flattened if notebook.title == notebook_name]
+    if len(title_matches) == 1:
+        return title_matches[0][0].id
+    if len(title_matches) > 1:
+        matches = ", ".join(path for _, path in title_matches)
+        raise ValueError(
+            f"Notebook name '{notebook_name}' matches multiple notebooks. Use a full path instead: {matches}"
+        )
+
+    raise ValueError(f"Notebook '{notebook_name}' was not found")
 
 # MCP Tools
 @mcp.tool()
@@ -94,6 +169,56 @@ async def search_notes(args: SearchNotesInput) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Error searching notes: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def list_notebooks() -> Dict[str, Any]:
+    """List available Joplin notebooks.
+
+    Returns:
+        Dictionary containing the notebook tree
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        notebooks = api.list_notebooks()
+        return {
+            "status": "success",
+            "total": len(notebooks),
+            "notebooks": [serialize_notebook(notebook) for notebook in notebooks],
+        }
+    except Exception as e:
+        logger.error(f"Error listing notebooks: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def create_notebook(args: CreateNotebookInput) -> Dict[str, Any]:
+    """Create a new Joplin notebook.
+
+    Args:
+        args: Notebook creation parameters
+            title: Notebook title
+            parent_id: Parent notebook ID (optional)
+            parent_notebook_name: Parent notebook name or path (optional)
+
+    Returns:
+        Dictionary containing the created notebook data
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        parent_id = resolve_notebook_id(args.parent_id, args.parent_notebook_name)
+        notebook = api.create_notebook(title=args.title, parent_id=parent_id)
+        return {
+            "status": "success",
+            "notebook": serialize_notebook(notebook),
+        }
+    except Exception as e:
+        logger.error(f"Error creating notebook: {e}")
         return {"error": str(e)}
 
 @mcp.tool()
@@ -135,6 +260,7 @@ async def create_note(args: CreateNoteInput) -> Dict[str, Any]:
             title: Note title
             body: Note content in Markdown (optional)
             parent_id: ID of parent folder (optional)
+            notebook_name: Notebook title or full path (optional)
             is_todo: Whether this is a todo item (optional)
     
     Returns:
@@ -144,10 +270,11 @@ async def create_note(args: CreateNoteInput) -> Dict[str, Any]:
         return {"error": "Joplin API client not initialized"}
     
     try:
+        parent_id = resolve_notebook_id(args.parent_id, args.notebook_name)
         note = api.create_note(
             title=args.title,
             body=args.body,
-            parent_id=args.parent_id,
+            parent_id=parent_id,
             is_todo=args.is_todo
         )
         return {
@@ -175,6 +302,7 @@ async def update_note(args: UpdateNoteInput) -> Dict[str, Any]:
             title: New title (optional)
             body: New content (optional)
             parent_id: New parent folder ID (optional)
+            notebook_name: New notebook title or full path (optional)
             is_todo: New todo status (optional)
     
     Returns:
@@ -184,11 +312,12 @@ async def update_note(args: UpdateNoteInput) -> Dict[str, Any]:
         return {"error": "Joplin API client not initialized"}
     
     try:
+        parent_id = resolve_notebook_id(args.parent_id, args.notebook_name)
         note = api.update_note(
             note_id=args.note_id,
             title=args.title,
             body=args.body,
-            parent_id=args.parent_id,
+            parent_id=parent_id,
             is_todo=args.is_todo
         )
         return {
@@ -247,10 +376,12 @@ async def import_markdown(args: ImportMarkdownInput) -> Dict[str, Any]:
     try:
         file_path = Path(args.file_path)
         md_content = MarkdownContent.from_file(file_path)
+        parent_id = resolve_notebook_id(args.parent_id, args.notebook_name)
         
         note = api.create_note(
             title=md_content.title,
-            body=md_content.content
+            body=md_content.content,
+            parent_id=parent_id
         )
         
         return {

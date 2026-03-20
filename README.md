@@ -5,6 +5,8 @@ A Model Context Protocol (MCP) Server for [Joplin](https://joplinapp.org/) that 
 ## ✨ Features
 
 - 🔍 **Search Notes**: Full-text search across all notes
+- 📚 **List Notebooks**: Browse available notebooks and sub-notebooks
+- 🗂️ **Create Notebooks**: Create notebooks and nested sub-notebooks
 - 📖 **Read Notes**: Retrieve individual notes
 - ✏️ **Edit Notes**: Create new notes and update existing ones
 - 🗑️ **Delete Notes**: Move notes to trash or delete permanently
@@ -92,6 +94,20 @@ Retrieve a specific note by its ID.
 **Parameters:**
 - `note_id` (string): ID of the note
 
+### list_notebooks
+List all available notebooks as a tree.
+
+**Parameters:**
+- None
+
+### create_notebook
+Create a new notebook.
+
+**Parameters:**
+- `title` (string): Notebook title
+- `parent_id` (string, optional): Parent notebook ID
+- `parent_notebook_name` (string, optional): Parent notebook title or full path
+
 ### create_note
 Create a new note.
 
@@ -99,6 +115,7 @@ Create a new note.
 - `title` (string): Note title
 - `body` (string, optional): Note content in Markdown
 - `parent_id` (string, optional): ID of parent folder
+- `notebook_name` (string, optional): Notebook title or full path such as `Work/Projects`
 - `is_todo` (boolean, optional): Whether this is a todo item
 
 ### update_note
@@ -109,6 +126,7 @@ Update an existing note.
 - `title` (string, optional): New title
 - `body` (string, optional): New content
 - `parent_id` (string, optional): New parent folder ID
+- `notebook_name` (string, optional): New notebook title or full path such as `Work/Projects`
 - `is_todo` (boolean, optional): New todo status
 
 ### delete_note
@@ -123,6 +141,8 @@ Import a markdown file as a new note.
 
 **Parameters:**
 - `file_path` (string): Path to the markdown file
+- `parent_id` (string, optional): ID of parent folder
+- `notebook_name` (string, optional): Notebook title or full path such as `Work/Projects`
 
 ## 🧪 Development
 
