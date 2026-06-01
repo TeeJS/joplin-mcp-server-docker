@@ -12,7 +12,10 @@ keywords = ["joplin", "mcp", "note-taking", "ai", "claude"]
 homepage = "https://weigend.studio"
 repository = "https://github.com/dweigend/joplin-mcp"
 dependencies = [
-    "mcp[cli]",
+    # Pinned: FastMCP tool-schema behavior changes between minor releases
+    # (1.x stopped flattening single pydantic-model args). Keep within a known
+    # -good minor so `uv sync`/`uv lock` stay deterministic; bump deliberately.
+    "mcp[cli]>=1.26.0,<1.27.0",
     "httpx",
     "python-dotenv",
     "requests",
