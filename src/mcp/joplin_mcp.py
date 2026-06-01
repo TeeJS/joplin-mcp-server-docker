@@ -7,13 +7,12 @@ from datetime import datetime
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
 
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.joplin.joplin_api import JoplinAPI, JoplinNotebook, JoplinNote, OrderDirection
-from src.joplin.joplin_utils import get_token_from_env, MarkdownContent
+from src.joplin.joplin_utils import get_token_from_env, get_base_url_from_env, MarkdownContent
 
 # Initialize FastMCP server
 mcp = FastMCP("joplin")
@@ -27,47 +26,17 @@ logger = logging.getLogger(__name__)
 
 # Initialize Joplin API client
 try:
-    api = JoplinAPI(token=get_token_from_env())
-    logger.info("Successfully initialized Joplin API client")
+    api = JoplinAPI(token=get_token_from_env(), base_url=get_base_url_from_env())
+    logger.info(f"Successfully initialized Joplin API client (base_url={get_base_url_from_env()})")
 except Exception as e:
     logger.error(f"Failed to initialize Joplin API client: {e}")
     api = None
 
-# Input Models
-class SearchNotesInput(BaseModel):
-    """Input parameters for searching notes."""
-    query: str
-    limit: Optional[int] = 100
-
-class CreateNoteInput(BaseModel):
-    """Input parameters for creating a note."""
-    title: str
-    body: Optional[str] = None
-    parent_id: Optional[str] = None
-    notebook_name: Optional[str] = None
-    is_todo: Optional[bool] = False
-
-class UpdateNoteInput(BaseModel):
-    """Input parameters for updating a note."""
-    note_id: str
-    title: Optional[str] = None
-    body: Optional[str] = None
-    parent_id: Optional[str] = None
-    notebook_name: Optional[str] = None
-    is_todo: Optional[bool] = None
-
-class ImportMarkdownInput(BaseModel):
-    """Input parameters for importing markdown files."""
-    file_path: str
-    notebook_name: Optional[str] = None
-    parent_id: Optional[str] = None
-
-
-class CreateNotebookInput(BaseModel):
-    """Input parameters for creating a notebook."""
-    title: str
-    parent_id: Optional[str] = None
-    parent_notebook_name: Optional[str] = None
+# Tool parameters are declared as explicit primitive arguments (not a single
+# pydantic-model argument). FastMCP in mcp>=1.x exposes a model-typed argument
+# as a nested `{"args": {...}}` object, which broke MCP clients that pass the
+# fields at the top level. Explicit args keep the tool schema flat and stable
+# across mcp versions, so this works on both the host and in the devcontainer.
 
 
 def serialize_notebook(notebook: JoplinNotebook) -> Dict[str, Any]:
@@ -135,22 +104,21 @@ def resolve_notebook_id(parent_id: Optional[str], notebook_name: Optional[str]) 
 
 # MCP Tools
 @mcp.tool()
-async def search_notes(args: SearchNotesInput) -> Dict[str, Any]:
+async def search_notes(query: str, limit: int = 100) -> Dict[str, Any]:
     """Search for notes in Joplin.
-    
+
     Args:
-        args: Search parameters
-            query: Search query string
-            limit: Maximum number of results (default: 100)
-    
+        query: Search query string
+        limit: Maximum number of results (default: 100)
+
     Returns:
         Dictionary containing search results
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
-    
+
     try:
-        results = api.search_notes(query=args.query, limit=args.limit)
+        results = api.search_notes(query=query, limit=limit)
         return {
             "status": "success",
             "total": len(results.items),
@@ -195,14 +163,17 @@ async def list_notebooks() -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def create_notebook(args: CreateNotebookInput) -> Dict[str, Any]:
+async def create_notebook(
+    title: str,
+    parent_id: Optional[str] = None,
+    parent_notebook_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """Create a new Joplin notebook.
 
     Args:
-        args: Notebook creation parameters
-            title: Notebook title
-            parent_id: Parent notebook ID (optional)
-            parent_notebook_name: Parent notebook name or path (optional)
+        title: Notebook title
+        parent_id: Parent notebook ID (optional)
+        parent_notebook_name: Parent notebook name or path (optional)
 
     Returns:
         Dictionary containing the created notebook data
@@ -211,8 +182,8 @@ async def create_notebook(args: CreateNotebookInput) -> Dict[str, Any]:
         return {"error": "Joplin API client not initialized"}
 
     try:
-        parent_id = resolve_notebook_id(args.parent_id, args.parent_notebook_name)
-        notebook = api.create_notebook(title=args.title, parent_id=parent_id)
+        parent_id = resolve_notebook_id(parent_id, parent_notebook_name)
+        notebook = api.create_notebook(title=title, parent_id=parent_id)
         return {
             "status": "success",
             "notebook": serialize_notebook(notebook),
@@ -252,30 +223,35 @@ async def get_note(note_id: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 @mcp.tool()
-async def create_note(args: CreateNoteInput) -> Dict[str, Any]:
+async def create_note(
+    title: str,
+    body: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    notebook_name: Optional[str] = None,
+    is_todo: bool = False,
+) -> Dict[str, Any]:
     """Create a new note in Joplin.
-    
+
     Args:
-        args: Note creation parameters
-            title: Note title
-            body: Note content in Markdown (optional)
-            parent_id: ID of parent folder (optional)
-            notebook_name: Notebook title or full path (optional)
-            is_todo: Whether this is a todo item (optional)
-    
+        title: Note title
+        body: Note content in Markdown (optional)
+        parent_id: ID of parent folder (optional)
+        notebook_name: Notebook title or full path (optional)
+        is_todo: Whether this is a todo item (optional)
+
     Returns:
         Dictionary containing the created note data
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
-    
+
     try:
-        parent_id = resolve_notebook_id(args.parent_id, args.notebook_name)
+        parent_id = resolve_notebook_id(parent_id, notebook_name)
         note = api.create_note(
-            title=args.title,
-            body=args.body,
+            title=title,
+            body=body,
             parent_id=parent_id,
-            is_todo=args.is_todo
+            is_todo=is_todo
         )
         return {
             "status": "success",
@@ -293,32 +269,38 @@ async def create_note(args: CreateNoteInput) -> Dict[str, Any]:
         return {"error": str(e)}
 
 @mcp.tool()
-async def update_note(args: UpdateNoteInput) -> Dict[str, Any]:
+async def update_note(
+    note_id: str,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    notebook_name: Optional[str] = None,
+    is_todo: Optional[bool] = None,
+) -> Dict[str, Any]:
     """Update an existing note in Joplin.
-    
+
     Args:
-        args: Note update parameters
-            note_id: ID of note to update
-            title: New title (optional)
-            body: New content (optional)
-            parent_id: New parent folder ID (optional)
-            notebook_name: New notebook title or full path (optional)
-            is_todo: New todo status (optional)
-    
+        note_id: ID of note to update
+        title: New title (optional)
+        body: New content (optional)
+        parent_id: New parent folder ID (optional)
+        notebook_name: New notebook title or full path (optional)
+        is_todo: New todo status (optional)
+
     Returns:
         Dictionary containing the updated note data
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
-    
+
     try:
-        parent_id = resolve_notebook_id(args.parent_id, args.notebook_name)
+        parent_id = resolve_notebook_id(parent_id, notebook_name)
         note = api.update_note(
-            note_id=args.note_id,
-            title=args.title,
-            body=args.body,
+            note_id=note_id,
+            title=title,
+            body=body,
             parent_id=parent_id,
-            is_todo=args.is_todo
+            is_todo=is_todo
         )
         return {
             "status": "success",
@@ -360,23 +342,28 @@ async def delete_note(note_id: str, permanent: bool = False) -> Dict[str, Any]:
         return {"error": str(e)}
 
 @mcp.tool()
-async def import_markdown(args: ImportMarkdownInput) -> Dict[str, Any]:
+async def import_markdown(
+    file_path: str,
+    notebook_name: Optional[str] = None,
+    parent_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Import a markdown file as a new note.
-    
+
     Args:
-        args: Import parameters
-            file_path: Path to the markdown file
-    
+        file_path: Path to the markdown file
+        notebook_name: Destination notebook title or full path (optional)
+        parent_id: Destination notebook ID (optional)
+
     Returns:
         Dictionary containing the created note data
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
-    
+
     try:
-        file_path = Path(args.file_path)
+        file_path = Path(file_path)
         md_content = MarkdownContent.from_file(file_path)
-        parent_id = resolve_notebook_id(args.parent_id, args.notebook_name)
+        parent_id = resolve_notebook_id(parent_id, notebook_name)
         
         note = api.create_note(
             title=md_content.title,

@@ -16,7 +16,8 @@ dependencies = [
     "httpx",
     "python-dotenv",
     "requests",
-    "pydantic"
+    "pydantic",
+    "uvicorn>=0.34.0",
 ]
 
 [project.optional-dependencies]
