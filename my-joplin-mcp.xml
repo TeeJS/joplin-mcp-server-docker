@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>joplin-mcp</Name>
+  <Repository>ghcr.io/teejs/joplin-mcp-server-docker:latest</Repository>
+  <Registry/>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <ReadMe/>
+  <Overview>Joplin MCP Server (Streamable HTTP). Bridge to a Joplin Desktop Web Clipper API on another host. Point MCP clients at http://[IP]:[PORT:8000]/mcp.</Overview>
+  <Category/>
+  <WebUI></WebUI>
+  <TemplateURL/>
+  <Icon></Icon>
+  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <PostArgs></PostArgs>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Port 8000" Target="8000" Default="" Mode="tcp" Description="" Type="Port" Display="always" Required="true" Mask="false">8000</Config>
+  <Config Name="JOPLIN_HOST" Target="JOPLIN_HOST" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="false">192.168.1.50</Config>
+  <Config Name="JOPLIN_PORT" Target="JOPLIN_PORT" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="false">41184</Config>
+  <Config Name="MCP_PORT" Target="MCP_PORT" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="false">8000</Config>
+  <Config Name="JOPLIN_TOKEN" Target="JOPLIN_TOKEN" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <TailscaleStateDir/>
+</Container>

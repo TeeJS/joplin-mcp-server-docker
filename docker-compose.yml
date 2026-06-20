@@ -1,0 +1,15 @@
+services:
+  joplin-mcp:
+    build: .
+    image: joplin-mcp:latest
+    container_name: joplin-mcp
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      JOPLIN_TOKEN: "${JOPLIN_TOKEN:?set JOPLIN_TOKEN in a .env file next to this compose file}"
+      JOPLIN_HOST: "${JOPLIN_HOST:-host.docker.internal}"
+      JOPLIN_PORT: "${JOPLIN_PORT:-41184}"
+      MCP_PORT: "8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -80,15 +80,15 @@ class MarkdownContent:
 
 def get_token_from_env(env_var: str = "JOPLIN_TOKEN") -> str:
     """Read the Joplin API token from environment variable.
-    
+
     First tries to load from .env file, then from environment.
-    
+
     Args:
         env_var: Name of the environment variable containing the token
-        
+
     Returns:
         The API token
-        
+
     Raises:
         JoplinConfigError: If the token is not set or invalid
     """
@@ -109,6 +109,18 @@ def get_token_from_env(env_var: str = "JOPLIN_TOKEN") -> str:
         )
 
     return token
+
+
+def get_joplin_url_from_env() -> str:
+    """Build the Joplin Web Clipper base URL from environment variables.
+
+    Reads JOPLIN_HOST (default: localhost) and JOPLIN_PORT (default: 41184).
+    Used when the MCP server runs in a container and Joplin is on another host.
+    """
+    load_dotenv()
+    host = os.environ.get("JOPLIN_HOST", "localhost").strip() or "localhost"
+    port = os.environ.get("JOPLIN_PORT", "41184").strip() or "41184"
+    return f"http://{host}:{port}"
 
 def format_timestamp(ts: datetime | None) -> str:
     """Format a timestamp for display.

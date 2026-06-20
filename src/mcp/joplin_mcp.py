@@ -1,6 +1,7 @@
 """Joplin MCP Server implementation."""
 
 import logging
+import os
 import sys
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -13,10 +14,19 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.joplin.joplin_api import JoplinAPI, JoplinNote, OrderDirection
-from src.joplin.joplin_utils import get_token_from_env, MarkdownContent
+from src.joplin.joplin_utils import (
+    MarkdownContent,
+    get_joplin_url_from_env,
+    get_token_from_env,
+)
 
-# Initialize FastMCP server
-mcp = FastMCP("joplin")
+# MCP transport binding (overridable for containerized deployments)
+MCP_HOST = os.environ.get("MCP_HOST", "0.0.0.0").strip() or "0.0.0.0"
+MCP_PORT = int(os.environ.get("MCP_PORT", "8000").strip() or "8000")
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "streamable-http").strip() or "streamable-http"
+
+# Initialize FastMCP server. host/port are read by the streamable-http and sse transports.
+mcp = FastMCP("joplin", host=MCP_HOST, port=MCP_PORT)
 
 # Configure logging
 logging.basicConfig(
@@ -27,7 +37,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize Joplin API client
 try:
-    api = JoplinAPI(token=get_token_from_env())
+    api = JoplinAPI(
+        token=get_token_from_env(),
+        base_url=get_joplin_url_from_env(),
+    )
     logger.info("Successfully initialized Joplin API client")
 except Exception as e:
     logger.error(f"Failed to initialize Joplin API client: {e}")
@@ -270,5 +283,8 @@ async def import_markdown(args: ImportMarkdownInput) -> Dict[str, Any]:
         return {"error": str(e)}
 
 if __name__ == "__main__":
-    logging.info("Starting Joplin MCP Server...")
-    mcp.run(transport='stdio')
+    logger.info(
+        "Starting Joplin MCP Server (transport=%s, host=%s, port=%s)",
+        MCP_TRANSPORT, MCP_HOST, MCP_PORT,
+    )
+    mcp.run(transport=MCP_TRANSPORT)
