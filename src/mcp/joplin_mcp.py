@@ -71,6 +71,11 @@ class ImportMarkdownInput(BaseModel):
     """Input parameters for importing markdown files."""
     file_path: str
 
+class TagNoteInput(BaseModel):
+    """Input parameters for attaching/detaching a tag on a note."""
+    note_id: str
+    tag_title: str
+
 # MCP Tools
 @mcp.tool()
 async def search_notes(args: SearchNotesInput) -> Dict[str, Any]:
@@ -281,6 +286,117 @@ async def import_markdown(args: ImportMarkdownInput) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error importing markdown: {e}")
         return {"error": str(e)}
+
+@mcp.tool()
+async def list_tags() -> Dict[str, Any]:
+    """List every tag that exists in Joplin.
+
+    Use this to discover the available tag vocabulary before tagging a note.
+    New tags must be created by the user in Joplin Desktop; this server cannot
+    create them.
+
+    Returns:
+        Dictionary with the full tag list as {id, title} entries.
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        tags = api.list_tags()
+        return {"status": "success", "total": len(tags), "tags": tags}
+    except Exception as e:
+        logger.error(f"Error listing tags: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_note_tags(note_id: str) -> Dict[str, Any]:
+    """List the tags currently attached to a specific note.
+
+    Args:
+        note_id: ID of the note.
+
+    Returns:
+        Dictionary containing the note's tags as {id, title} entries.
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        tags = api.get_note_tags(note_id)
+        return {"status": "success", "note_id": note_id, "tags": tags}
+    except Exception as e:
+        logger.error(f"Error getting tags for note {note_id}: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def tag_note(args: TagNoteInput) -> Dict[str, Any]:
+    """Attach an EXISTING tag to a note.
+
+    The tag must already exist in Joplin; this server will not create new tags.
+    If the tag does not exist, the call fails with a clear error so the model
+    can pick a different existing tag (use list_tags to see what's available).
+
+    Args:
+        args: note_id and tag_title (case-insensitive match against existing tags).
+
+    Returns:
+        Dictionary describing the result, including the resolved tag id.
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        tag = api.find_tag_by_title(args.tag_title)
+        if tag is None:
+            return {
+                "error": (
+                    f"Tag '{args.tag_title}' does not exist. Tag creation is "
+                    "disabled on this server. Call list_tags to see available "
+                    "tags, or ask the user to create the tag in Joplin Desktop."
+                )
+            }
+
+        api.add_existing_tag_to_note(tag_id=tag["id"], note_id=args.note_id)
+        return {
+            "status": "success",
+            "note_id": args.note_id,
+            "tag": tag,
+        }
+    except Exception as e:
+        logger.error(f"Error tagging note {args.note_id}: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def untag_note(args: TagNoteInput) -> Dict[str, Any]:
+    """Remove a tag from a note. The tag itself is not deleted from Joplin.
+
+    Args:
+        args: note_id and tag_title (case-insensitive match against existing tags).
+
+    Returns:
+        Dictionary describing the result.
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        tag = api.find_tag_by_title(args.tag_title)
+        if tag is None:
+            return {"error": f"Tag '{args.tag_title}' does not exist."}
+
+        api.remove_tag_from_note(tag_id=tag["id"], note_id=args.note_id)
+        return {
+            "status": "success",
+            "note_id": args.note_id,
+            "tag": tag,
+        }
+    except Exception as e:
+        logger.error(f"Error untagging note {args.note_id}: {e}")
+        return {"error": str(e)}
+
 
 if __name__ == "__main__":
     logger.info(

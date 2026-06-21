@@ -372,6 +372,45 @@ class JoplinAPI:
             endpoint += "?permanent=1"
         self._make_request("DELETE", endpoint)
 
+    # ------------------------------------------------------------------ tags
+
+    def _get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Walk every page of a paginated endpoint and return the concatenated items."""
+        params = dict(params or {})
+        page = 1
+        out: list[dict[str, Any]] = []
+        while True:
+            params["page"] = page
+            resp = self._make_request("GET", endpoint, params=params)
+            out.extend(resp.get("items", []))
+            if not resp.get("has_more"):
+                return out
+            page += 1
+
+    def list_tags(self) -> list[dict[str, Any]]:
+        """Return every tag in Joplin as {id, title} dicts."""
+        return self._get_all_pages("tags", params={"fields": "id,title"})
+
+    def find_tag_by_title(self, title: str) -> dict[str, Any] | None:
+        """Look up a tag by its title (case-insensitive). Returns None if absent."""
+        needle = title.strip().lower()
+        for tag in self.list_tags():
+            if tag.get("title", "").strip().lower() == needle:
+                return tag
+        return None
+
+    def get_note_tags(self, note_id: str) -> list[dict[str, Any]]:
+        """Return tags attached to a single note."""
+        return self._get_all_pages(f"notes/{note_id}/tags", params={"fields": "id,title"})
+
+    def add_existing_tag_to_note(self, tag_id: str, note_id: str) -> None:
+        """Attach an existing tag to a note. Does NOT create the tag."""
+        self._make_request("POST", f"tags/{tag_id}/notes", json={"id": note_id})
+
+    def remove_tag_from_note(self, tag_id: str, note_id: str) -> None:
+        """Detach a tag from a note. The tag itself is not deleted."""
+        self._make_request("DELETE", f"tags/{tag_id}/notes/{note_id}")
+
     def search_notes(
         self,
         query: str,
