@@ -45,7 +45,8 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          outputs: type=image,oci-mediatypes=false,push=true
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
