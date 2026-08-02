@@ -1,6 +1,8 @@
 # PROJECT.md — Secure the Joplin MCP server
 
-Status: **awaiting go/no-go**
+Status: **code complete on `security/harden-exposed-server`; not yet deployed, so
+the endpoint is still open.** Phases 0–4 of the skill's order of work are done.
+Phase 5 (verify by attacking, from outside) cannot run until the image ships.
 Created: 2026-08-01
 Reference pattern: `TeeJS/linkwarden-mcp-server`. **Not `plex-mcp-server-docker`.** Plex's
 `modules/auth.py` was written against Authentik and its shape reflects that — the audience
@@ -126,22 +128,36 @@ Claude Code client on the LAN working.
 
 ## 5. How will we verify it is done?
 
-- [ ] With auth on, an unauthenticated `initialize` **from outside the network** returns
-      `401` and no `Mcp-Session-Id`.
-- [ ] That `401` carries `WWW-Authenticate: Bearer resource_metadata="…", scope="…"`.
-- [ ] Both `/.well-known/oauth-protected-resource` and the `/mcp`-suffixed variant return
-      JSON whose `resource` equals the connector URL exactly, with no stray whitespace.
-- [ ] `/.well-known/oauth-authorization-server` mirrors the issuer's live document.
-- [ ] `/healthz` answers unauthenticated and returns the app's own JSON, not proxy HTML.
-- [ ] A token with no mapped group gets `403`, not `401`.
-- [ ] A read-group caller sees only read tools in `tools/list` **and** is refused when it
-      calls `delete_note` by name anyway.
-- [ ] A write-group caller completes a real tool call end to end.
-- [ ] `import_markdown` refuses a path outside its configured root, and is disabled when no
-      root is set.
-- [ ] A forced Joplin API failure returns an error containing no token.
-- [ ] With auth off, the current LAN client still works unchanged.
-- [ ] CI builds green and the image starts — i.e. the `mcp` pin actually holds.
+Verified locally against a mock OIDC issuer, on **both** `mcp` 1.28.1 (what the deployed
+image reports) and 1.29.0 (what the lockfile resolves) — 27 assertions, all passing:
+
+- [x] With auth on, an unauthenticated `initialize` returns `401` and no `Mcp-Session-Id`.
+- [x] That `401` carries `WWW-Authenticate: Bearer resource_metadata="…", scope="…"`.
+- [x] Both `/.well-known/oauth-protected-resource` and the `/mcp`-suffixed variant return
+      JSON whose `resource` equals the connector URL exactly. Tested with deliberate
+      whitespace around the issuer env var; the served value is trimmed.
+- [x] `/.well-known/oauth-authorization-server` mirrors the issuer's live document.
+- [x] `/healthz` answers unauthenticated and returns the app's own JSON.
+- [x] A token with no mapped group gets `403 insufficient_scope`, not `401`.
+- [x] A read-group caller sees 4 tools instead of 9 **and** is refused when it calls
+      `delete_note` by name anyway.
+- [x] Garbage, expired, and wrong-issuer tokens are refused; a token in the query string
+      is refused rather than accepted as a fallback.
+- [x] `import_markdown` refuses `..`, absolute paths, and `/proc/self/environ`, and is not
+      registered at all when no root is set.
+- [x] A forced Joplin API failure returns an error containing no token.
+- [x] `delete_note(permanent=true)` is refused under the default policy.
+- [x] A space-delimited `groups` claim is accepted, as well as an array.
+
+Pending deployment — these cannot be checked from here:
+
+- [ ] CI builds green and the container starts, i.e. the `uv sync --frozen` path and the
+      `mcp<2` bound both hold in the image.
+- [ ] `/healthz` through the public hostname returns the app's JSON, not proxy HTML.
+- [ ] An unauthenticated `initialize` **from outside the network** returns `401`.
+      This is the one that matters; everything above is a proxy for it.
+- [ ] A write-group caller completes a real tool call end to end against Joplin.
+- [ ] With auth off, the existing LAN client still works unchanged.
 
 ## Planned changes
 
@@ -238,11 +254,22 @@ to `my-joplin-mcp.xml` with `Mask="true"` on every secret.
 1. **Which Authelia groups map to read and to write?** Needed for `MCP_READ_GROUPS` /
    `MCP_WRITE_GROUPS`. Deployment config, not code — the build is not blocked on it.
 
-## Immediate mitigation, available ahead of the OAuth work
+## What is left, and it is all deployment
 
-F1 is confirmed live and F2 means the exposure includes the Joplin token itself. If the full
-change is not landing today, the blast radius can be cut in one small commit and a container
-restart: `JOPLIN_READ_ONLY=true` registers no write tools at all, and `import_markdown`
-becomes disabled-by-default. That leaves an anonymous reader of the note database — still
-bad, but not an anonymous deleter or token thief. Awaiting the call on whether to ship that
-first.
+The code is done and committed on `security/harden-exposed-server` (three commits). Nothing
+protects the running server until it is deployed, so the endpoint is open right now.
+
+1. **Merge and push to `main`.** Not done — pushing publishes an image, which is the user's
+   call. CI only builds on `main` and `v*` tags, so a branch push alone ships nothing.
+2. **Set `JOPLIN_READ_ONLY=true` on the container now.** This is the single largest
+   reduction available before OAuth is configured, and it needs no rebuild — just the env
+   var and a restart. Leave it on until step 4 is verified.
+3. **Redeploy the Unraid template** so the new variables appear in the Docker tab. The copy
+   on the host is outside git; back it up before replacing it.
+4. **Create the Authelia client** using the block in `README-DOCKER.md`, back up
+   `configuration.yml`, run `authelia validate-config` before restarting, then set
+   `MCP_OAUTH_ENABLED=true`, `MCP_READ_GROUPS`, and `MCP_WRITE_GROUPS`.
+5. **Run the exposure test from outside the network** (`references/verification.md` §2). Not
+   from the LAN, and read the body rather than the status code.
+
+Until step 5 passes, this is not done, regardless of how green the local suite is.
