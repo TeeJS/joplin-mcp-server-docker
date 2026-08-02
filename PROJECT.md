@@ -1,8 +1,9 @@
 # PROJECT.md — Secure the Joplin MCP server
 
-Status: **code complete on `security/harden-exposed-server`; not yet deployed, so
-the endpoint is still open.** Phases 0–4 of the skill's order of work are done.
-Phase 5 (verify by attacking, from outside) cannot run until the image ships.
+Status: **done and verified in production.** All six phases of the skill's order of work are
+complete. The endpoint that answered an anonymous `initialize` with `200` and a session id
+now returns `401` from outside the network. Two interactive follow-ups remain, listed at the
+end of §5.
 Created: 2026-08-01
 Reference pattern: `TeeJS/linkwarden-mcp-server`. **Not `plex-mcp-server-docker`.** Plex's
 `modules/auth.py` was written against Authentik and its shape reflects that — the audience
@@ -165,13 +166,27 @@ Authelia (throwaway container on port 18099, since removed):
       `invalid_grant`, not `invalid_client`, confirming the secret and
       `client_secret_post` are both right.
 
-Pending the container being updated — the running one is still the 2026-07-16 image:
+Verified on the live deployment, 2026-08-01, after the container was updated and the five
+OAuth variables set:
 
-- [ ] Apply / Force Update in the Unraid Docker tab, with `MCP_OAUTH_ENABLED=true`.
-- [ ] An unauthenticated `initialize` **from outside the network** returns `401`.
-      This is the one that matters; everything above is a proxy for it.
-- [ ] Claude lists tools and a write-group caller completes a real tool call against Joplin.
-- [ ] Regenerate the client secret — the plaintext was echoed into a chat transcript.
+- [x] Container healthy on the new image, logging `OAuth enabled` with
+      `resource=https://joplin-mcp.schmitzplex.com/mcp` and both group lists mapped.
+      Env inspected with `cat -A`: no stray tabs or trailing whitespace.
+- [x] Anonymous `initialize` over the public path → `401`, **no session id**, carrying
+      `resource_metadata` and `scope`. Before the change the same request returned `200`
+      and a session id.
+- [x] Anonymous `tools/list` → `401`. Nine tools reachable before, zero now.
+- [x] **Refused from genuinely outside the network** — fetched from Anthropic's egress
+      rather than over hairpin NAT from the LAN: `GET /mcp` → `401 Unauthorized`.
+- [x] `/healthz` and both protected-resource documents answer externally and return the
+      app's own JSON, not reverse-proxy HTML.
+
+Left, and both are the user's to do interactively:
+
+- [ ] Add the connector at claude.ai and complete one real tool call as a `joplin-admins`
+      member. Every component is proven — client credentials, group membership, discovery,
+      the gate — but the consent step needs a browser.
+- [ ] Regenerate the client secret. The plaintext was echoed into a chat transcript.
 
 ## Planned changes
 
