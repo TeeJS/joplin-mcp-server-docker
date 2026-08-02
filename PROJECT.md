@@ -249,10 +249,17 @@ to `my-joplin-mcp.xml` with `Mask="true"` on every secret.
   `MCP_OAUTH_ISSUER` must be set to exactly.
 - **Identity provider:** Authelia. Not Authentik — this is why plex is not the pattern.
 
+- **Groups:** `MCP_READ_GROUPS=joplin-readers`, `MCP_WRITE_GROUPS=joplin-admins`, baked
+  into `my-joplin-mcp.xml` as template defaults.
+- **`joplin-admins` granted to `tschmitz`** in `/mnt/user/appdata/Authelia/users_database.yml`
+  on 2026-08-01, appended to the existing `linkwarden-admins` rather than replacing it.
+  Backed up alongside as `users_database.yml.bak-20260801-205025`; `authelia
+  validate-config` passed and the container restarted healthy. The file backend does not
+  watch that file, so the restart was required for the group to take effect.
+
 ## Open questions
 
-1. **Which Authelia groups map to read and to write?** Needed for `MCP_READ_GROUPS` /
-   `MCP_WRITE_GROUPS`. Deployment config, not code — the build is not blocked on it.
+None. The remaining work is deployment, below.
 
 ## What is left, and it is all deployment
 
@@ -266,9 +273,11 @@ protects the running server until it is deployed, so the endpoint is open right 
    var and a restart. Leave it on until step 4 is verified.
 3. **Redeploy the Unraid template** so the new variables appear in the Docker tab. The copy
    on the host is outside git; back it up before replacing it.
-4. **Create the Authelia client** using the block in `README-DOCKER.md`, back up
-   `configuration.yml`, run `authelia validate-config` before restarting, then set
-   `MCP_OAUTH_ENABLED=true`, `MCP_READ_GROUPS`, and `MCP_WRITE_GROUPS`.
+4. **Create the Authelia `joplin-mcp` client** using the block in `README-DOCKER.md`, which
+   is filled in for this deployment and modelled on the working `linkwarden-mcp` client
+   already in `configuration.yml`. Back up `configuration.yml`, run
+   `authelia validate-config` before restarting. Then set `MCP_OAUTH_ENABLED=true` on the
+   container; the group variables are already template defaults.
 5. **Run the exposure test from outside the network** (`references/verification.md` §2). Not
    from the LAN, and read the body rather than the status code.
 

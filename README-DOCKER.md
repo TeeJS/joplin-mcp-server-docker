@@ -96,32 +96,69 @@ Four things here are **not** defaults, and each fails with the same opaque
 client-side message ("Authorization with the MCP server failed"). The Authelia log
 names the real cause; read it first.
 
+Generate the client secret first. The plaintext goes into Claude's connector
+settings; only the digest goes in the config file:
+
+```bash
+docker exec Authelia authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986
+```
+
+That prints a `Random Password` (the plaintext — save it somewhere safe, it is
+not recoverable) and a `Digest` starting `$pbkdf2-sha512$`, which is what goes in
+`client_secret` below.
+
+Add to `identity_providers.oidc` — a new entry under the existing
+`claims_policies:` and `clients:` keys, alongside whatever is already there. No
+new `jwks` entry is needed; the provider-level RS256 key already present signs
+access tokens for every client.
+
 ```yaml
-identity_providers:
-  oidc:
     claims_policies:
-      joplin_mcp_policy:
+      joplin_mcp:
         access_token:
           - 'groups'                                   # groups in the ACCESS token
     clients:
       - client_id: 'joplin-mcp'
         client_name: 'Joplin MCP'
-        client_secret: '$pbkdf2-sha512$...'            # hashed, never plaintext
+        client_secret: '$pbkdf2-sha512$...'            # the Digest, never the plaintext
         public: false
         authorization_policy: 'one_factor'             # two_factor needs an enrolled device
         require_pkce: true
         pkce_challenge_method: 'S256'
         access_token_signed_response_alg: 'RS256'      # else tokens are opaque
         token_endpoint_auth_method: 'client_secret_post'  # Claude uses POST, not Basic
-        claims_policy: 'joplin_mcp_policy'
+        claims_policy: 'joplin_mcp'
         audience:
-          - 'https://joplin-mcp.example.com/mcp'       # exactly the resource value
+          - 'https://joplin-mcp.schmitzplex.com/mcp'   # exactly the resource value
         redirect_uris:
           - 'https://claude.ai/api/mcp/auth_callback'
-        scopes: ['openid', 'profile', 'groups', 'offline_access']
-        grant_types: ['authorization_code', 'refresh_token']
-        response_types: ['code']
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+          - 'address'
+          - 'phone'
+          - 'groups'
+          - 'offline_access'
+        grant_types:
+          - 'authorization_code'
+          - 'refresh_token'
+        response_types:
+          - 'code'
 ```
+
+The user also has to actually hold the group, which is separate from the client:
+
+```yaml
+users:
+  tschmitz:
+    groups:
+      - 'joplin-admins'
+```
+
+Authelia's file backend does not watch `users_database.yml` unless
+`authentication_backend.file.watch: true` is set, so a group change needs a
+container restart to take effect.
 
 - `access_token_signed_response_alg: 'RS256'` — Authelia issues **opaque** access
   tokens by default, which cannot be validated statelessly at all.
