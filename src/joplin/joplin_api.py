@@ -13,6 +13,15 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+class JoplinAPIError(Exception):
+    """A Joplin API request failed.
+
+    Raised in place of the underlying `requests` exception so that the token,
+    which the Joplin API requires as a query parameter, never reaches a log
+    file or an MCP tool response. Always raised with `from None` so the
+    original exception is not chained back in via the traceback.
+    """
+
 class OrderDirection(Enum):
     """Sort direction for API queries."""
     ASC = "ASC"
@@ -190,6 +199,20 @@ class JoplinAPI:
         self.token = token
         self.base_url = base_url.rstrip("/")
 
+    def _redact(self, text: str) -> str:
+        """Strip the API token out of arbitrary text.
+
+        The Joplin REST API authenticates by query parameter, so the token is
+        part of every request URL. `requests` puts that URL into the string form
+        of its exceptions, and callers surface exception text to the MCP client
+        and to the container log. Without this, one failed call hands the token
+        to whoever triggered it.
+        """
+        if not self.token:
+            return text
+
+        return text.replace(self.token, "***REDACTED***")
+
     def _make_request(
         self,
         method: str,
@@ -232,8 +255,12 @@ class JoplinAPI:
             return response.json()
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {e}")
-            raise
+            # Re-raise with the token stripped. The original exception carries
+            # the full request URL, token query parameter included, and it flows
+            # straight into log files and MCP tool responses.
+            message = self._redact(str(e))
+            logger.error("API request failed: %s", message)
+            raise JoplinAPIError(message) from None
 
     def get_notes(
         self,

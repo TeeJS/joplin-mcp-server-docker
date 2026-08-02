@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from pathlib import Path
 
+from mcp import types
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
@@ -19,14 +20,96 @@ from src.joplin.joplin_utils import (
     get_joplin_url_from_env,
     get_token_from_env,
 )
+from src.mcp import oauth
+
+def env_str(name: str, default: str = "") -> str:
+    """Read an environment variable, trimmed.
+
+    These are pasted by hand into container UIs, where a stray tab or trailing
+    space is routine and produces failures that point nowhere near the mistake.
+    """
+    return os.environ.get(name, default).strip() or default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable. Only an explicit true value enables."""
+    raw = env_str(name, "").lower()
+    if not raw:
+        return default
+
+    return raw in {"1", "true", "yes", "on"}
+
 
 # MCP transport binding (overridable for containerized deployments)
-MCP_HOST = os.environ.get("MCP_HOST", "0.0.0.0").strip() or "0.0.0.0"
-MCP_PORT = int(os.environ.get("MCP_PORT", "8000").strip() or "8000")
-MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "streamable-http").strip() or "streamable-http"
+MCP_HOST = env_str("MCP_HOST", "0.0.0.0")
+MCP_PORT = int(env_str("MCP_PORT", "8000"))
+MCP_TRANSPORT = env_str("MCP_TRANSPORT", "streamable-http")
+
+# --- Tool exposure policy ---------------------------------------------------
+#
+# The read surface, as an allowlist. Anything not named here counts as a write
+# tool. This is deliberately an allowlist rather than a list of write tools: a
+# tool added later and left unclassified is then treated as a write, which is
+# the safe direction to fail.
+READ_TOOLS = frozenset({
+    "search_notes",
+    "get_note",
+    "list_tags",
+    "get_note_tags",
+})
+
+# Disables every tool outside READ_TOOLS. Server-level, so no future group
+# grant can widen it back.
+JOPLIN_READ_ONLY = env_bool("JOPLIN_READ_ONLY", False)
+
+# `import_markdown` reads a caller-supplied path off the container filesystem
+# and returns its contents. Unset, the tool is not registered at all; set, it is
+# confined to this directory. Default-off because an unconfined version is an
+# arbitrary file read — including /proc/self/environ, which holds JOPLIN_TOKEN.
+JOPLIN_IMPORT_ROOT = env_str("JOPLIN_IMPORT_ROOT", "")
+
+# Permanent deletion bypasses the Joplin trash and cannot be undone. Off unless
+# explicitly enabled; a `permanent=True` call is otherwise refused rather than
+# silently downgraded, so the caller is not misled about what happened.
+JOPLIN_ALLOW_PERMANENT_DELETE = env_bool("JOPLIN_ALLOW_PERMANENT_DELETE", False)
+
+def _transport_security():
+    """Optional Host/Origin validation, for DNS-rebinding protection.
+
+    The SDK ships this disabled for backwards compatibility, which leaves an
+    ungated LAN deployment drivable by any web page the user happens to visit:
+    CORS hides the responses, but it does not stop the requests, so blind writes
+    and deletes still land.
+
+    Left off unless MCP_ALLOWED_HOSTS is set, because an allowlist that does not
+    name every address the container is legitimately reached on breaks access in
+    a way that is tedious to diagnose. With OAuth enabled this matters much less
+    — a hostile page cannot obtain a bearer token.
+    """
+    allowed_hosts = [h.strip() for h in env_str("MCP_ALLOWED_HOSTS").split(",") if h.strip()]
+    if not allowed_hosts:
+        return None
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    allowed_origins = [
+        o.strip() for o in env_str("MCP_ALLOWED_ORIGINS").split(",") if o.strip()
+    ]
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
 
 # Initialize FastMCP server. host/port are read by the streamable-http and sse transports.
-mcp = FastMCP("joplin", host=MCP_HOST, port=MCP_PORT)
+mcp = FastMCP(
+    "joplin",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    transport_security=_transport_security(),
+)
 
 # Configure logging
 logging.basicConfig(
@@ -75,6 +158,29 @@ class TagNoteInput(BaseModel):
     """Input parameters for attaching/detaching a tag on a note."""
     note_id: str
     tag_title: str
+
+def resolve_import_path(raw_path: str) -> Path:
+    """Resolve a caller-supplied import path, confined to JOPLIN_IMPORT_ROOT.
+
+    Resolves symlinks and `..` before comparing, so neither can be used to walk
+    out of the configured root. Raises ValueError if the path escapes it.
+    """
+    if not JOPLIN_IMPORT_ROOT:
+        raise ValueError(
+            "Markdown import is disabled on this server. Set JOPLIN_IMPORT_ROOT "
+            "to a directory to enable it."
+        )
+
+    root = Path(JOPLIN_IMPORT_ROOT).resolve()
+    candidate = (root / raw_path).resolve() if not Path(raw_path).is_absolute() \
+        else Path(raw_path).resolve()
+
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(
+            f"Refusing to read outside the import root. Allowed root: {root}"
+        )
+
+    return candidate
 
 # MCP Tools
 @mcp.tool()
@@ -237,7 +343,18 @@ async def delete_note(note_id: str, permanent: bool = False) -> Dict[str, Any]:
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
-    
+
+    if permanent and not JOPLIN_ALLOW_PERMANENT_DELETE:
+        # Refused rather than downgraded to a trash delete, so the caller is not
+        # told something happened that did not.
+        return {
+            "error": (
+                "Permanent deletion is disabled on this server. Retry without "
+                "permanent=true to move the note to the trash, where it can be "
+                "recovered."
+            )
+        }
+
     try:
         api.delete_note(note_id, permanent=permanent)
         return {
@@ -251,19 +368,27 @@ async def delete_note(note_id: str, permanent: bool = False) -> Dict[str, Any]:
 @mcp.tool()
 async def import_markdown(args: ImportMarkdownInput) -> Dict[str, Any]:
     """Import a markdown file as a new note.
-    
+
+    Only files under the server's configured import root can be read. Paths are
+    resolved before the check, so symlinks and `..` cannot escape it.
+
     Args:
         args: Import parameters
-            file_path: Path to the markdown file
-    
+            file_path: Path to the markdown file, relative to the import root
+
     Returns:
         Dictionary containing the created note data
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
-    
+
     try:
-        file_path = Path(args.file_path)
+        file_path = resolve_import_path(args.file_path)
+    except ValueError as e:
+        logger.warning("Rejected markdown import for %r: %s", args.file_path, e)
+        return {"error": str(e)}
+
+    try:
         md_content = MarkdownContent.from_file(file_path)
         
         note = api.create_note(
@@ -398,9 +523,190 @@ async def untag_note(args: TagNoteInput) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+def apply_tool_policy() -> None:
+    """Unregister tools the server-level policy forbids.
+
+    Runs at import, so the policy holds for every transport rather than only the
+    one `__main__` happens to start. Unregistering rather than refusing at call
+    time means a forbidden tool is never advertised in the first place.
+    """
+    registered = [tool.name for tool in mcp._tool_manager.list_tools()]
+
+    removed: list[str] = []
+
+    if JOPLIN_READ_ONLY:
+        for name in registered:
+            if name not in READ_TOOLS:
+                mcp.remove_tool(name)
+                removed.append(name)
+    elif not JOPLIN_IMPORT_ROOT and "import_markdown" in registered:
+        # Already covered by the read-only branch when that is on.
+        mcp.remove_tool("import_markdown")
+        removed.append("import_markdown")
+
+    if removed:
+        logger.info("Tool policy removed %d tool(s): %s",
+                    len(removed), ", ".join(sorted(removed)))
+
+    logger.info(
+        "Tool policy: read_only=%s, import_root=%s, allow_permanent_delete=%s, "
+        "exposed=%s",
+        JOPLIN_READ_ONLY,
+        JOPLIN_IMPORT_ROOT or "<disabled>",
+        JOPLIN_ALLOW_PERMANENT_DELETE,
+        ", ".join(sorted(t.name for t in mcp._tool_manager.list_tools())),
+    )
+
+
+apply_tool_policy()
+
+
+# --- Per-request authorization ---------------------------------------------
+
+def permission_for_request() -> str:
+    """Read the permission the ASGI gate stashed on the HTTP request.
+
+    Falls back to write when there is no HTTP request at all (stdio) or when no
+    policy was applied. Group policy narrows access; it never widens it, and the
+    server-level switches above have already removed anything they forbid.
+    """
+    try:
+        request = mcp._mcp_server.request_context.request
+    except LookupError:
+        return oauth.PERMISSION_WRITE
+
+    if request is None:
+        return oauth.PERMISSION_WRITE
+
+    return request.scope.get(
+        oauth.SCOPE_PERMISSION_KEY, oauth.PERMISSION_WRITE
+    )
+
+
+def install_tool_gate() -> None:
+    """Gate tools/list and tools/call on the caller's permission.
+
+    Wraps the handlers FastMCP already installed rather than re-registering
+    them, which would mean reimplementing its tool dispatch and schema handling.
+
+    Both halves are enforced. Filtering the list alone is not a control — a
+    client can call a tool that was never listed — and gating calls alone makes
+    the model retry against a wall.
+    """
+    srv = mcp._mcp_server
+    original_list = srv.request_handlers[types.ListToolsRequest]
+    original_call = srv.request_handlers[types.CallToolRequest]
+
+    async def gated_list(req):
+        result = await original_list(req)
+
+        if permission_for_request() != oauth.PERMISSION_READ:
+            return result
+
+        result.root.tools = [
+            tool for tool in result.root.tools if tool.name in READ_TOOLS
+        ]
+        return result
+
+    async def gated_call(req):
+        name = req.params.name
+
+        if permission_for_request() == oauth.PERMISSION_READ \
+                and name not in READ_TOOLS:
+            logger.warning("AUTHZ_TOOL_DENIED tool=%s permission=read", name)
+            return types.ServerResult(types.CallToolResult(
+                content=[types.TextContent(
+                    type="text",
+                    text=(
+                        f"forbidden: {name} requires write access, which your "
+                        "account has not been granted"
+                    ),
+                )],
+                isError=True,
+            ))
+
+        return await original_call(req)
+
+    srv.request_handlers[types.ListToolsRequest] = gated_list
+    srv.request_handlers[types.CallToolRequest] = gated_call
+
+
+install_tool_gate()
+
+
+def build_app():
+    """Assemble the ASGI app: health and discovery open, the MCP endpoint gated.
+
+    FastMCP.run() leaves nowhere to insert middleware, so the app is built here
+    and served with uvicorn directly.
+    """
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    config = oauth.OAuthConfig.from_env()
+    config.validate()
+
+    app = mcp.streamable_http_app()
+
+    async def healthz(request):
+        return JSONResponse({
+            "status": "ok",
+            "service": "joplin-mcp",
+            "oauth": config.enabled,
+        })
+
+    # Outside the gate, so the container healthcheck survives turning auth on.
+    app.router.routes.insert(0, Route(oauth.HEALTH_PATH, healthz, methods=["GET"]))
+
+    if config.enabled:
+        verifier = oauth.TokenVerifier(config)
+
+        for route in reversed(oauth.build_routes(config, verifier)):
+            app.router.routes.insert(0, route)
+
+        app.add_middleware(
+            oauth.AuthMiddleware, config=config, verifier=verifier
+        )
+
+        # Log the normalized values, not the raw ones — printing the pre-trim
+        # issuer while serving the trimmed one sends you hunting a fixed bug.
+        logger.info(
+            "OAuth enabled: issuer=%s resource=%s audience=%s groups_claim=%s "
+            "read_groups=%s write_groups=%s",
+            config.issuer,
+            config.resource_url,
+            config.audience or "<unchecked>",
+            config.groups.claim,
+            ",".join(config.groups.read_groups) or "<none>",
+            ",".join(config.groups.write_groups) or "<none>",
+        )
+        if not config.groups.configured:
+            logger.warning(
+                "No group policy configured: every authenticated caller gets "
+                "every exposed tool. Set MCP_READ_GROUPS / MCP_WRITE_GROUPS."
+            )
+    else:
+        logger.warning(
+            "OAuth is DISABLED. Anyone who can reach %s:%s has full use of the "
+            "Joplin token. Only acceptable when the endpoint is unreachable by "
+            "untrusted callers.",
+            MCP_HOST, MCP_PORT,
+        )
+
+    return app
+
+
 if __name__ == "__main__":
     logger.info(
         "Starting Joplin MCP Server (transport=%s, host=%s, port=%s)",
         MCP_TRANSPORT, MCP_HOST, MCP_PORT,
     )
-    mcp.run(transport=MCP_TRANSPORT)
+
+    if MCP_TRANSPORT == "streamable-http":
+        import uvicorn
+
+        uvicorn.run(build_app(), host=MCP_HOST, port=MCP_PORT)
+    else:
+        # stdio and sse keep the stock path; neither is gated, and stdio does
+        # not need to be.
+        mcp.run(transport=MCP_TRANSPORT)
