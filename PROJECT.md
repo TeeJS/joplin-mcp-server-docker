@@ -149,15 +149,29 @@ image reports) and 1.29.0 (what the lockfile resolves) — 27 assertions, all pa
 - [x] `delete_note(permanent=true)` is refused under the default policy.
 - [x] A space-delimited `groups` claim is accepted, as well as an array.
 
-Pending deployment — these cannot be checked from here:
+Verified against the **published image** on the Unraid host, OAuth on, pointed at the live
+Authelia (throwaway container on port 18099, since removed):
 
-- [ ] CI builds green and the container starts, i.e. the `uv sync --frozen` path and the
-      `mcp<2` bound both hold in the image.
-- [ ] `/healthz` through the public hostname returns the app's JSON, not proxy HTML.
+- [x] CI green; `uv sync --frozen` and the `mcp<2` bound both hold in the image.
+- [x] Container runs healthy as non-root (`joplin`), so `/healthz` works through the
+      HEALTHCHECK with auth enabled — i.e. health really is outside the gate.
+- [x] Anonymous `initialize` → `401`, no session id, `WWW-Authenticate` carrying both
+      `resource_metadata` and `scope="openid profile groups offline_access"`.
+- [x] `resource` is exactly `https://joplin-mcp.schmitzplex.com/mcp`.
+- [x] Both well-known paths answer; the AS mirror resolves against the live issuer.
+- [x] Docker media types are `application/vnd.docker.*`, so Unraid's update check can read
+      the manifest.
+- [x] Authelia `joplin-mcp` client authenticates: an invalid-code exchange returns
+      `invalid_grant`, not `invalid_client`, confirming the secret and
+      `client_secret_post` are both right.
+
+Pending the container being updated — the running one is still the 2026-07-16 image:
+
+- [ ] Apply / Force Update in the Unraid Docker tab, with `MCP_OAUTH_ENABLED=true`.
 - [ ] An unauthenticated `initialize` **from outside the network** returns `401`.
       This is the one that matters; everything above is a proxy for it.
-- [ ] A write-group caller completes a real tool call end to end against Joplin.
-- [ ] With auth off, the existing LAN client still works unchanged.
+- [ ] Claude lists tools and a write-group caller completes a real tool call against Joplin.
+- [ ] Regenerate the client secret — the plaintext was echoed into a chat transcript.
 
 ## Planned changes
 
