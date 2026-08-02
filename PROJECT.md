@@ -181,12 +181,39 @@ OAuth variables set:
 - [x] `/healthz` and both protected-resource documents answer externally and return the
       app's own JSON, not reverse-proxy HTML.
 
-Left, and both are the user's to do interactively:
+- [x] Connector added at claude.ai and connected. The container logged
+      `AUTHZ_GRANTED permission=write` 18 times against subject
+      `3bfb08ae-…`, which proves the whole chain: the token validated, the `groups` claim
+      reached the **access** token (a missing claim would have been `403 AUTHZ_DENIED`),
+      and it mapped to `joplin-admins`.
 
-- [ ] Add the connector at claude.ai and complete one real tool call as a `joplin-admins`
-      member. Every component is proven — client credentials, group membership, discovery,
-      the gate — but the consent step needs a browser.
+Authelia advertises no `registration_endpoint`, so Claude's dynamic client registration
+cannot work and the connector's "optional" OAuth Client ID and Secret fields are in fact
+required. That surfaces as "Automatic client registration isn't supported."
+
+Left:
+
 - [ ] Regenerate the client secret. The plaintext was echoed into a chat transcript.
+- [ ] Decide what to do about the LAN client — see below.
+
+## Consequence: the direct LAN endpoint is gated too
+
+The gate is server-wide, so `http://192.168.1.25:8004/mcp` now returns `401` as well. Any
+Claude Code config pointing at the LAN address stops working. That is correct behaviour, not
+a regression — but it needs a decision.
+
+To point Claude Code at the gated endpoint instead, Authelia needs the loopback redirects a
+native client uses (RFC 8252, ephemeral port, so the port is ignored):
+
+```yaml
+        redirect_uris:
+          - 'https://claude.ai/api/mcp/auth_callback'
+          - 'http://localhost/callback'
+          - 'http://127.0.0.1/callback'
+```
+
+The alternative is to leave the LAN config removed and use the claude.ai connector from both
+places.
 
 ## Planned changes
 
