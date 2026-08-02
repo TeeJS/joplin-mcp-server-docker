@@ -4,14 +4,39 @@ Containerized fork of [`dweigend/joplin-mcp`](https://github.com/dweigend/joplin
 
 ## Environment variables
 
-| Variable        | Required | Default                  | Notes                                                     |
-| --------------- | -------- | ------------------------ | --------------------------------------------------------- |
-| `JOPLIN_TOKEN`  | yes      | —                        | Joplin Web Clipper API token.                             |
-| `JOPLIN_HOST`   | yes      | `host.docker.internal`   | IP/hostname of the box running Joplin Desktop.            |
-| `JOPLIN_PORT`   | no       | `41184`                  | Joplin Web Clipper port.                                  |
-| `MCP_PORT`      | no       | `8000`                   | Port the MCP server listens on inside the container.      |
-| `MCP_HOST`      | no       | `0.0.0.0`                | Bind address inside the container.                        |
-| `MCP_TRANSPORT` | no       | `streamable-http`        | Override only if you know what you're doing.              |
+| Variable                        | Required | Default                  | Notes                                                     |
+| ------------------------------- | -------- | ------------------------ | --------------------------------------------------------- |
+| `JOPLIN_TOKEN`                  | yes      | —                        | Joplin Web Clipper API token.                             |
+| `JOPLIN_HOST`                   | yes      | `host.docker.internal`   | IP/hostname of the box running Joplin Desktop.            |
+| `JOPLIN_PORT`                   | no       | `41184`                  | Joplin Web Clipper port.                                  |
+| `MCP_PORT`                      | no       | `8000`                   | Port the MCP server listens on inside the container.      |
+| `MCP_HOST`                      | no       | `0.0.0.0`                | Bind address inside the container.                        |
+| `MCP_TRANSPORT`                 | no       | `streamable-http`        | Override only if you know what you're doing.              |
+| `JOPLIN_READ_ONLY`              | no       | `false`                  | Disable every write tool. See below.                      |
+| `JOPLIN_IMPORT_ROOT`            | no       | — (tool disabled)        | Directory `import_markdown` may read from.                |
+| `JOPLIN_ALLOW_PERMANENT_DELETE` | no       | `false`                  | Allow unrecoverable `delete_note(permanent=true)`.        |
+
+## Tool exposure policy
+
+This server holds a Joplin token with full access to your notes. These three
+settings limit what any caller can do with it, independently of who the caller
+is — they apply even with no authentication in front.
+
+**`JOPLIN_READ_ONLY=true`** unregisters every tool outside the read allowlist
+(`search_notes`, `get_note`, `list_tags`, `get_note_tags`). Removed tools are not
+advertised and cannot be called. Set this whenever the endpoint is reachable by
+anyone you would not hand your notes to.
+
+**`JOPLIN_IMPORT_ROOT`** is unset by default, which removes `import_markdown`
+entirely. The tool reads a caller-supplied path off the container filesystem and
+returns the contents, so unconfined it reads any file the container can see —
+including `/proc/self/environ`, which holds `JOPLIN_TOKEN` itself. Set it only if
+you have mounted a folder to import from; paths are then resolved before the
+check, so symlinks and `..` cannot escape the root.
+
+**`JOPLIN_ALLOW_PERMANENT_DELETE`** is off by default. `delete_note` still works
+and still moves notes to the Joplin trash, where they can be recovered;
+`permanent=true` is refused rather than silently downgraded.
 
 ## Run with docker-compose (local test)
 

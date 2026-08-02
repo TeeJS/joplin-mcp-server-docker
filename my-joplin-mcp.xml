@@ -27,5 +27,8 @@
   <Config Name="JOPLIN_PORT" Target="JOPLIN_PORT" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="false">41184</Config>
   <Config Name="MCP_PORT" Target="MCP_PORT" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="false">8000</Config>
   <Config Name="JOPLIN_TOKEN" Target="JOPLIN_TOKEN" Default="" Mode="" Description="" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="JOPLIN_READ_ONLY" Target="JOPLIN_READ_ONLY" Default="false" Mode="" Description="true disables every write tool (create/update/delete/tag/import), leaving only search_notes, get_note, list_tags, get_note_tags. Set this while the endpoint is reachable without authentication." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="JOPLIN_IMPORT_ROOT" Target="JOPLIN_IMPORT_ROOT" Default="" Mode="" Description="Directory import_markdown may read from. Leave EMPTY to remove the tool. Unconfined it reads any file in the container, including /proc/self/environ, which contains JOPLIN_TOKEN." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="JOPLIN_ALLOW_PERMANENT_DELETE" Target="JOPLIN_ALLOW_PERMANENT_DELETE" Default="false" Mode="" Description="true allows delete_note(permanent=true), which bypasses the Joplin trash and cannot be undone. Leave false; normal deletes still work and stay recoverable." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
   <TailscaleStateDir/>
 </Container>
