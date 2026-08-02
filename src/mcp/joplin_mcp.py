@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from pathlib import Path
 
+from mcp import types
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
@@ -19,6 +20,7 @@ from src.joplin.joplin_utils import (
     get_joplin_url_from_env,
     get_token_from_env,
 )
+from src.mcp import oauth
 
 def env_str(name: str, default: str = "") -> str:
     """Read an environment variable, trimmed.
@@ -524,9 +526,152 @@ def apply_tool_policy() -> None:
 apply_tool_policy()
 
 
+# --- Per-request authorization ---------------------------------------------
+
+def permission_for_request() -> str:
+    """Read the permission the ASGI gate stashed on the HTTP request.
+
+    Falls back to write when there is no HTTP request at all (stdio) or when no
+    policy was applied. Group policy narrows access; it never widens it, and the
+    server-level switches above have already removed anything they forbid.
+    """
+    try:
+        request = mcp._mcp_server.request_context.request
+    except LookupError:
+        return oauth.PERMISSION_WRITE
+
+    if request is None:
+        return oauth.PERMISSION_WRITE
+
+    return request.scope.get(
+        oauth.SCOPE_PERMISSION_KEY, oauth.PERMISSION_WRITE
+    )
+
+
+def install_tool_gate() -> None:
+    """Gate tools/list and tools/call on the caller's permission.
+
+    Wraps the handlers FastMCP already installed rather than re-registering
+    them, which would mean reimplementing its tool dispatch and schema handling.
+
+    Both halves are enforced. Filtering the list alone is not a control — a
+    client can call a tool that was never listed — and gating calls alone makes
+    the model retry against a wall.
+    """
+    srv = mcp._mcp_server
+    original_list = srv.request_handlers[types.ListToolsRequest]
+    original_call = srv.request_handlers[types.CallToolRequest]
+
+    async def gated_list(req):
+        result = await original_list(req)
+
+        if permission_for_request() != oauth.PERMISSION_READ:
+            return result
+
+        result.root.tools = [
+            tool for tool in result.root.tools if tool.name in READ_TOOLS
+        ]
+        return result
+
+    async def gated_call(req):
+        name = req.params.name
+
+        if permission_for_request() == oauth.PERMISSION_READ \
+                and name not in READ_TOOLS:
+            logger.warning("AUTHZ_TOOL_DENIED tool=%s permission=read", name)
+            return types.ServerResult(types.CallToolResult(
+                content=[types.TextContent(
+                    type="text",
+                    text=(
+                        f"forbidden: {name} requires write access, which your "
+                        "account has not been granted"
+                    ),
+                )],
+                isError=True,
+            ))
+
+        return await original_call(req)
+
+    srv.request_handlers[types.ListToolsRequest] = gated_list
+    srv.request_handlers[types.CallToolRequest] = gated_call
+
+
+install_tool_gate()
+
+
+def build_app():
+    """Assemble the ASGI app: health and discovery open, the MCP endpoint gated.
+
+    FastMCP.run() leaves nowhere to insert middleware, so the app is built here
+    and served with uvicorn directly.
+    """
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    config = oauth.OAuthConfig.from_env()
+    config.validate()
+
+    app = mcp.streamable_http_app()
+
+    async def healthz(request):
+        return JSONResponse({
+            "status": "ok",
+            "service": "joplin-mcp",
+            "oauth": config.enabled,
+        })
+
+    # Outside the gate, so the container healthcheck survives turning auth on.
+    app.router.routes.insert(0, Route(oauth.HEALTH_PATH, healthz, methods=["GET"]))
+
+    if config.enabled:
+        verifier = oauth.TokenVerifier(config)
+
+        for route in reversed(oauth.build_routes(config, verifier)):
+            app.router.routes.insert(0, route)
+
+        app.add_middleware(
+            oauth.AuthMiddleware, config=config, verifier=verifier
+        )
+
+        # Log the normalized values, not the raw ones — printing the pre-trim
+        # issuer while serving the trimmed one sends you hunting a fixed bug.
+        logger.info(
+            "OAuth enabled: issuer=%s resource=%s audience=%s groups_claim=%s "
+            "read_groups=%s write_groups=%s",
+            config.issuer,
+            config.resource_url,
+            config.audience or "<unchecked>",
+            config.groups.claim,
+            ",".join(config.groups.read_groups) or "<none>",
+            ",".join(config.groups.write_groups) or "<none>",
+        )
+        if not config.groups.configured:
+            logger.warning(
+                "No group policy configured: every authenticated caller gets "
+                "every exposed tool. Set MCP_READ_GROUPS / MCP_WRITE_GROUPS."
+            )
+    else:
+        logger.warning(
+            "OAuth is DISABLED. Anyone who can reach %s:%s has full use of the "
+            "Joplin token. Only acceptable when the endpoint is unreachable by "
+            "untrusted callers.",
+            MCP_HOST, MCP_PORT,
+        )
+
+    return app
+
+
 if __name__ == "__main__":
     logger.info(
         "Starting Joplin MCP Server (transport=%s, host=%s, port=%s)",
         MCP_TRANSPORT, MCP_HOST, MCP_PORT,
     )
-    mcp.run(transport=MCP_TRANSPORT)
+
+    if MCP_TRANSPORT == "streamable-http":
+        import uvicorn
+
+        uvicorn.run(build_app(), host=MCP_HOST, port=MCP_PORT)
+    else:
+        # stdio and sse keep the stock path; neither is gated, and stdio does
+        # not need to be.
+        mcp.run(transport=MCP_TRANSPORT)
