@@ -15,6 +15,8 @@ Containerized fork of [`dweigend/joplin-mcp`](https://github.com/dweigend/joplin
 | `JOPLIN_READ_ONLY`              | no       | `false`                  | Disable every write tool. See below.                      |
 | `JOPLIN_IMPORT_ROOT`            | no       | — (tool disabled)        | Directory `import_markdown` may read from.                |
 | `JOPLIN_ALLOW_PERMANENT_DELETE` | no       | `false`                  | Allow unrecoverable `delete_note(permanent=true)`.        |
+| `MCP_ALLOWED_HOSTS`             | no       | — (check off)            | Comma-separated `Host` values, for DNS-rebinding protection. |
+| `MCP_ALLOWED_ORIGINS`           | no       | —                        | Comma-separated allowed `Origin` values.                  |
 
 ## Tool exposure policy
 

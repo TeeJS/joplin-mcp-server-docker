@@ -73,8 +73,43 @@ JOPLIN_IMPORT_ROOT = env_str("JOPLIN_IMPORT_ROOT", "")
 # silently downgraded, so the caller is not misled about what happened.
 JOPLIN_ALLOW_PERMANENT_DELETE = env_bool("JOPLIN_ALLOW_PERMANENT_DELETE", False)
 
+def _transport_security():
+    """Optional Host/Origin validation, for DNS-rebinding protection.
+
+    The SDK ships this disabled for backwards compatibility, which leaves an
+    ungated LAN deployment drivable by any web page the user happens to visit:
+    CORS hides the responses, but it does not stop the requests, so blind writes
+    and deletes still land.
+
+    Left off unless MCP_ALLOWED_HOSTS is set, because an allowlist that does not
+    name every address the container is legitimately reached on breaks access in
+    a way that is tedious to diagnose. With OAuth enabled this matters much less
+    — a hostile page cannot obtain a bearer token.
+    """
+    allowed_hosts = [h.strip() for h in env_str("MCP_ALLOWED_HOSTS").split(",") if h.strip()]
+    if not allowed_hosts:
+        return None
+
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    allowed_origins = [
+        o.strip() for o in env_str("MCP_ALLOWED_ORIGINS").split(",") if o.strip()
+    ]
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 # Initialize FastMCP server. host/port are read by the streamable-http and sse transports.
-mcp = FastMCP("joplin", host=MCP_HOST, port=MCP_PORT)
+mcp = FastMCP(
+    "joplin",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    transport_security=_transport_security(),
+)
 
 # Configure logging
 logging.basicConfig(
