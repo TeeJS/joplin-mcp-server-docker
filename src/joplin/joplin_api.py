@@ -473,13 +473,17 @@ class JoplinAPI:
     def search_notes(
         self,
         query: str,
-        limit: int = 100
+        limit: int = 100,
+        fields: list[str] | None = None
     ) -> PaginatedResponse[JoplinNote]:
         """Search for notes.
 
         Args:
             query: Search query string
             limit: Maximum number of results
+            fields: Fields to return. The search endpoint sends only id and
+                title unless asked, so body and timestamps come back empty
+                when this is omitted.
 
         Returns:
             PaginatedResponse containing matching JoplinNote objects
@@ -488,6 +492,9 @@ class JoplinAPI:
             "query": query,
             "limit": limit
         }
+
+        if fields:
+            params["fields"] = ",".join(fields)
         response = self._make_request("GET", "search", params=params)
         return PaginatedResponse(
             items=[JoplinNote.from_api_response(item) for item in response["items"]],

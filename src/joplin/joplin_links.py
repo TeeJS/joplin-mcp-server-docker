@@ -58,6 +58,7 @@ class LinkGraph:
 
 
 _cache: LinkGraph | None = None
+_notebook_cache: tuple[float, dict[str, str]] | None = None
 
 
 def flatten_notebook_paths(
@@ -72,6 +73,23 @@ def flatten_notebook_paths(
         paths[notebook.id] = path
         paths.update(flatten_notebook_paths(notebook.children or [], path))
 
+    return paths
+
+
+def get_notebook_paths(api: JoplinAPI) -> dict[str, str]:
+    """Notebook id to full path, cached briefly. Notebook trees change rarely."""
+    global _notebook_cache
+
+    if _notebook_cache and (time.monotonic() - _notebook_cache[0]) < CACHE_TTL_SECONDS:
+        return _notebook_cache[1]
+
+    try:
+        paths = flatten_notebook_paths(api.list_notebooks())
+    except Exception as exc:  # noqa: BLE001 - paths are a nicety, not a requirement
+        logger.warning(f"Could not resolve notebook paths: {exc}")
+        return _notebook_cache[1] if _notebook_cache else {}
+
+    _notebook_cache = (time.monotonic(), paths)
     return paths
 
 
@@ -158,9 +176,10 @@ def get_link_graph(api: JoplinAPI, refresh: bool = False) -> LinkGraph:
 
 
 def reset_cache() -> None:
-    """Drop the cached graph. Used by tests."""
-    global _cache
+    """Drop the cached graph and notebook paths. Used by tests."""
+    global _cache, _notebook_cache
     _cache = None
+    _notebook_cache = None
 
 
 def _neighbours_of(graph: LinkGraph, note_id: str, direction: str) -> dict[str, str]:

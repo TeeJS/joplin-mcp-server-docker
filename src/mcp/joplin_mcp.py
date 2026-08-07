@@ -12,8 +12,10 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.joplin.joplin_api import JoplinAPI, JoplinNotebook, JoplinNote, OrderDirection
-from src.joplin.joplin_links import find_neighbours, get_link_graph
-from src.joplin.joplin_utils import get_token_from_env, get_base_url_from_env, MarkdownContent
+from src.joplin.joplin_links import find_neighbours, get_link_graph, get_notebook_paths
+from src.joplin.joplin_utils import (
+    build_snippet, get_token_from_env, get_base_url_from_env, MarkdownContent,
+)
 
 # Initialize FastMCP server
 mcp = FastMCP("joplin")
@@ -104,13 +106,26 @@ def resolve_notebook_id(parent_id: Optional[str], notebook_name: Optional[str]) 
     raise ValueError(f"Notebook '{notebook_name}' was not found")
 
 # MCP Tools
+SEARCH_FIELDS = ["id", "title", "body", "parent_id", "updated_time", "is_todo"]
+SEARCH_SNIPPET_CHARS = 200
+
+
 @mcp.tool()
-async def search_notes(query: str, limit: int = 100) -> Dict[str, Any]:
+async def search_notes(
+    query: str,
+    limit: int = 20,
+    snippet_chars: int = SEARCH_SNIPPET_CHARS,
+) -> Dict[str, Any]:
     """Search for notes in Joplin.
+
+    Returns a short excerpt of each match centred on the query, which is
+    normally enough to judge relevance. Call get_note for the full text of the
+    ones worth reading.
 
     Args:
         query: Search query string
-        limit: Maximum number of results (default: 100)
+        limit: Maximum number of results (default: 20)
+        snippet_chars: Length of each excerpt; 0 omits excerpts (default: 200)
 
     Returns:
         Dictionary containing search results
@@ -119,22 +134,31 @@ async def search_notes(query: str, limit: int = 100) -> Dict[str, Any]:
         return {"error": "Joplin API client not initialized"}
 
     try:
-        results = api.search_notes(query=query, limit=limit)
+        results = api.search_notes(query=query, limit=limit, fields=SEARCH_FIELDS)
+        notebook_paths = get_notebook_paths(api)
+
+        notes = []
+        for note in results.items:
+            # Omit empty fields rather than sending a null for each one: at a
+            # hundred results the nulls cost more than the content.
+            entry = {"id": note.id, "title": note.title}
+            snippet = build_snippet(note.body, query, snippet_chars) if snippet_chars else ""
+            if snippet:
+                entry["snippet"] = snippet
+            notebook = notebook_paths.get(note.parent_id or "")
+            if notebook:
+                entry["notebook"] = notebook
+            if note.updated_time:
+                entry["updated_time"] = note.updated_time.isoformat()
+            if note.is_todo:
+                entry["is_todo"] = True
+            notes.append(entry)
+
         return {
             "status": "success",
-            "total": len(results.items),
+            "total": len(notes),
             "has_more": results.has_more,
-            "notes": [
-                {
-                    "id": note.id,
-                    "title": note.title,
-                    "body": note.body,
-                    "created_time": note.created_time.isoformat() if note.created_time else None,
-                    "updated_time": note.updated_time.isoformat() if note.updated_time else None,
-                    "is_todo": note.is_todo
-                }
-                for note in results.items
-            ]
+            "notes": notes,
         }
     except Exception as e:
         logger.error(f"Error searching notes: {e}")
