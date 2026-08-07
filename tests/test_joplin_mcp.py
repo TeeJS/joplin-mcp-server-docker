@@ -109,7 +109,7 @@ class JoplinMCPTests(unittest.IsolatedAsyncioTestCase):
         joplin_mcp.api = fake_api
 
         result = await joplin_mcp.create_notebook(
-            joplin_mcp.CreateNotebookInput(title="Projects", parent_notebook_name="Work")
+            title="Projects", parent_notebook_name="Work"
         )
 
         self.assertEqual(result["status"], "success")
@@ -128,7 +128,7 @@ class JoplinMCPTests(unittest.IsolatedAsyncioTestCase):
         joplin_mcp.api = fake_api
 
         result = await joplin_mcp.create_note(
-            joplin_mcp.CreateNoteInput(title="Roadmap", body="Draft", notebook_name="Work/Projects")
+            title="Roadmap", body="Draft", notebook_name="Work/Projects"
         )
 
         self.assertEqual(result["status"], "success")
@@ -145,7 +145,7 @@ class JoplinMCPTests(unittest.IsolatedAsyncioTestCase):
             file_path.write_text("# Imported Note\n\nBody text", encoding="utf-8")
 
             result = await joplin_mcp.import_markdown(
-                joplin_mcp.ImportMarkdownInput(file_path=str(file_path), notebook_name="Work")
+                file_path=str(file_path), notebook_name="Work"
             )
 
         self.assertEqual(result["status"], "success")

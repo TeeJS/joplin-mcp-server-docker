@@ -5,6 +5,7 @@ from datetime import datetime
 
 from src.joplin.joplin_api import JoplinNote, JoplinNotebook, PaginatedResponse
 from src.joplin.joplin_utils import build_snippet
+from src.joplin import joplin_embeddings as emb
 from src.joplin import joplin_links
 from src.mcp import joplin_mcp
 
@@ -63,6 +64,9 @@ class FakeSearchAPI:
 class SearchNotesToolTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         joplin_links.reset_cache()
+        # Pin "no index" rather than letting get_index() read the real one from
+        # the user's cache, which would make these depend on the dev machine.
+        emb.set_index(None)
         self.notes = [
             JoplinNote(
                 id="a" * 32,
@@ -121,6 +125,17 @@ class SearchNotesToolTests(unittest.IsolatedAsyncioTestCase):
         result = await joplin_mcp.search_notes("deploy", snippet_chars=0)
 
         self.assertNotIn("snippet", result["notes"][0])
+
+    async def test_hybrid_falls_back_to_keyword_without_an_index(self):
+        result = await joplin_mcp.search_notes("deploy")
+
+        self.assertEqual(result["mode"], "keyword")
+        self.assertIn("build_semantic_index", result["notice"])
+
+    async def test_rejects_an_unknown_mode(self):
+        result = await joplin_mcp.search_notes("deploy", mode="telepathy")
+
+        self.assertIn("mode must be", result["error"])
 
     async def test_reports_has_more(self):
         self.api.has_more = True

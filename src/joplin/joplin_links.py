@@ -13,7 +13,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from src.joplin.joplin_api import JoplinAPI, JoplinNotebook, OrderDirection
 
@@ -204,6 +204,7 @@ def find_neighbours(
     direction: str = "both",
     depth: int = 1,
     limit: int = 50,
+    semantic_provider: Callable[[str], dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Breadth-first walk out from a note along its links.
 
@@ -214,6 +215,10 @@ def find_neighbours(
             "both" to treat the graph as undirected.
         depth: How many hops to follow.
         limit: Maximum neighbours to return.
+        semantic_provider: Optional id -> {neighbour id: score} lookup whose
+            results are walked as additional edges. At depth 1 this is the same
+            answer a nearest-neighbour query gives; past depth 1 it is not, and
+            that transitive reach is the reason to enable it.
 
     Returns:
         Dictionary with the origin note, the neighbours found and whether the
@@ -238,12 +243,20 @@ def find_neighbours(
     for hop in range(1, depth + 1):
         next_frontier: list[str] = []
         for current in frontier:
-            for neighbour, relation in _neighbours_of(graph, current, direction).items():
+            relations = _neighbours_of(graph, current, direction)
+            scores: dict[str, float] = {}
+            if semantic_provider is not None:
+                for neighbour, score in semantic_provider(current).items():
+                    scores[neighbour] = score
+                    # An explicit link is the stronger claim; don't overwrite it.
+                    relations.setdefault(neighbour, "semantic")
+
+            for neighbour, relation in relations.items():
                 if neighbour in seen:
                     continue
                 seen.add(neighbour)
                 next_frontier.append(neighbour)
-                found.append({
+                entry = {
                     "id": neighbour,
                     "title": graph.titles.get(neighbour, "(unknown)"),
                     "notebook": graph.notebooks.get(neighbour, ""),
@@ -252,7 +265,10 @@ def find_neighbours(
                     # Only meaningful past the first hop, where the connection
                     # is otherwise unexplained.
                     "via": graph.titles.get(current) if hop > 1 else None,
-                })
+                }
+                if relation == "semantic":
+                    entry["score"] = round(scores[neighbour], 4)
+                found.append(entry)
         if not next_frontier:
             break
         frontier = next_frontier

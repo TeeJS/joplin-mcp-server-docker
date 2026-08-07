@@ -12,6 +12,17 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.joplin.joplin_api import JoplinAPI, JoplinNotebook, JoplinNote, OrderDirection
+from src.joplin.joplin_embeddings import (
+    EmbeddingUnavailable,
+    build_index,
+    fuse,
+    get_embedder,
+    get_index,
+    save_index,
+    semantic_search,
+    set_index,
+    similar_notes,
+)
 from src.joplin.joplin_links import find_neighbours, get_link_graph, get_notebook_paths
 from src.joplin.joplin_utils import (
     build_snippet, get_token_from_env, get_base_url_from_env, MarkdownContent,
@@ -108,23 +119,72 @@ def resolve_notebook_id(parent_id: Optional[str], notebook_name: Optional[str]) 
 # MCP Tools
 SEARCH_FIELDS = ["id", "title", "body", "parent_id", "updated_time", "is_todo"]
 SEARCH_SNIPPET_CHARS = 200
+SEARCH_MODES = ("hybrid", "keyword", "semantic")
+# Fusion needs more candidates per side than it returns, or a note ranked well
+# by one side but just outside the other's cut-off can never be promoted.
+CANDIDATE_MULTIPLIER = 3
+
+
+def _keyword_notes(query: str, limit: int):
+    return api.search_notes(query=query, limit=limit, fields=SEARCH_FIELDS)
+
+
+def _shape_hit(
+    note_id: str,
+    title: str,
+    snippet: str,
+    parent_id: str,
+    updated: Optional[str],
+    matched: Optional[str],
+    score: Optional[float],
+    is_todo: bool,
+    notebook_paths: Dict[str, str],
+) -> Dict[str, Any]:
+    """One result, with empty fields left out rather than sent as nulls."""
+    entry: Dict[str, Any] = {"id": note_id, "title": title}
+    if snippet:
+        entry["snippet"] = snippet
+    notebook = notebook_paths.get(parent_id or "")
+    if notebook:
+        entry["notebook"] = notebook
+    if updated:
+        entry["updated_time"] = updated
+    if matched:
+        entry["matched"] = matched
+    if score:
+        entry["score"] = score
+    if is_todo:
+        entry["is_todo"] = True
+    return entry
 
 
 @mcp.tool()
 async def search_notes(
     query: str,
     limit: int = 20,
+    mode: str = "hybrid",
+    keyword_weight: float = 0.3,
     snippet_chars: int = SEARCH_SNIPPET_CHARS,
 ) -> Dict[str, Any]:
-    """Search for notes in Joplin.
+    """Search for notes in Joplin by keyword, meaning, or both.
 
-    Returns a short excerpt of each match centred on the query, which is
-    normally enough to judge relevance. Call get_note for the full text of the
-    ones worth reading.
+    Hybrid is the default and is usually what you want: keyword search alone
+    misses notes that make the same point in different words, and meaning-based
+    search alone is poor at exact strings such as ticket keys or identifiers,
+    which embeddings barely represent. Blending covers both failure modes.
+
+    Semantic modes need an index; call build_semantic_index first. Without one
+    this falls back to keyword search and says so in the response.
+
+    Returns a short excerpt of each match, normally enough to judge relevance.
+    Call get_note for the full text of the ones worth reading.
 
     Args:
         query: Search query string
         limit: Maximum number of results (default: 20)
+        mode: "hybrid", "keyword" or "semantic" (default: "hybrid")
+        keyword_weight: In hybrid mode, how much the keyword ranking counts,
+            0 to 1. Raise it for identifier-style queries (default: 0.3)
         snippet_chars: Length of each excerpt; 0 omits excerpts (default: 200)
 
     Returns:
@@ -132,36 +192,175 @@ async def search_notes(
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
+    if mode not in SEARCH_MODES:
+        return {"error": f"mode must be one of {', '.join(SEARCH_MODES)}"}
 
     try:
-        results = api.search_notes(query=query, limit=limit, fields=SEARCH_FIELDS)
         notebook_paths = get_notebook_paths(api)
+        notes: list[Dict[str, Any]] = []
+        note_of_id: Dict[str, JoplinNote] = {}
+        fell_back = None
 
-        notes = []
-        for note in results.items:
-            # Omit empty fields rather than sending a null for each one: at a
-            # hundred results the nulls cost more than the content.
-            entry = {"id": note.id, "title": note.title}
-            snippet = build_snippet(note.body, query, snippet_chars) if snippet_chars else ""
-            if snippet:
-                entry["snippet"] = snippet
-            notebook = notebook_paths.get(note.parent_id or "")
-            if notebook:
-                entry["notebook"] = notebook
-            if note.updated_time:
-                entry["updated_time"] = note.updated_time.isoformat()
-            if note.is_todo:
-                entry["is_todo"] = True
-            notes.append(entry)
+        index = get_index() if mode in ("hybrid", "semantic") else None
+        if mode in ("hybrid", "semantic") and (index is None or index.chunk_count == 0):
+            fell_back = "No semantic index yet; ran keyword search. Call build_semantic_index."
+            mode = "keyword"
 
-        return {
+        has_more = False
+
+        if mode == "keyword":
+            response_page = _keyword_notes(query, limit)
+            has_more = response_page.has_more
+            for note in response_page.items:
+                notes.append(_shape_hit(
+                    note.id, note.title,
+                    build_snippet(note.body, query, snippet_chars) if snippet_chars else "",
+                    note.parent_id or "",
+                    note.updated_time.isoformat() if note.updated_time else None,
+                    None, None, note.is_todo, notebook_paths,
+                ))
+        else:
+            vector = get_embedder().encode([query])[0]
+            candidates = limit * CANDIDATE_MULTIPLIER if mode == "hybrid" else limit
+            hits = semantic_search(index, vector, candidates)
+
+            if mode == "hybrid" and keyword_weight > 0:
+                keyword_notes = _keyword_notes(query, candidates).items
+                note_of_id = {note.id: note for note in keyword_notes}
+                pool = len({h["id"] for h in hits} | {n.id for n in keyword_notes})
+                hits = fuse(hits, [n.id for n in keyword_notes], keyword_weight, limit)
+                has_more = pool > limit
+            else:
+                has_more = len(hits) > limit
+                hits = hits[:limit]
+                for hit in hits:
+                    hit["matched"] = "semantic"
+
+            for hit in hits:
+                note = note_of_id.get(hit["id"])
+                # Semantic hits describe themselves with the chunk that matched;
+                # keyword-only hits have no chunk, so excerpt their body.
+                snippet = hit.get("chunk") or (
+                    build_snippet(note.body if note else "", query, snippet_chars)
+                )
+                if snippet_chars and len(snippet) > snippet_chars:
+                    snippet = f"{snippet[:snippet_chars].rstrip()}…"
+                notes.append(_shape_hit(
+                    hit["id"],
+                    hit["title"] or (note.title if note else ""),
+                    snippet if snippet_chars else "",
+                    hit.get("parent_id") or (note.parent_id if note else "") or "",
+                    _iso_stamp(hit.get("updated")) or (
+                        note.updated_time.isoformat() if note and note.updated_time else None
+                    ),
+                    hit.get("matched"),
+                    hit.get("score") or None,
+                    bool(note.is_todo) if note else False,
+                    notebook_paths,
+                ))
+
+        response = {
             "status": "success",
+            "mode": mode,
             "total": len(notes),
-            "has_more": results.has_more,
+            "has_more": has_more,
             "notes": notes,
         }
+        if fell_back:
+            response["notice"] = fell_back
+        return response
+    except EmbeddingUnavailable as e:
+        return {"error": f"Semantic search unavailable: {e}"}
     except Exception as e:
         logger.error(f"Error searching notes: {e}")
+        return {"error": str(e)}
+
+
+def _iso_stamp(epoch_seconds: Optional[int]) -> Optional[str]:
+    if not epoch_seconds:
+        return None
+    return datetime.fromtimestamp(epoch_seconds).isoformat()
+
+
+@mcp.tool()
+async def build_semantic_index(rebuild: bool = False) -> Dict[str, Any]:
+    """Build or update the local semantic search index.
+
+    Embeds every note on this machine using a bundled model; nothing is sent
+    anywhere. Notes whose timestamp has not moved keep their existing vectors,
+    so a second call after a few edits is quick where the first is not.
+
+    Args:
+        rebuild: Re-embed everything instead of reusing unchanged notes
+
+    Returns:
+        Dictionary describing the resulting index
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        previous = None if rebuild else get_index()
+        index = build_index(api, get_embedder(), previous=previous)
+        save_index(index)
+        set_index(index)
+        return {
+            "status": "success",
+            "notes": index.note_count,
+            "chunks": index.chunk_count,
+        }
+    except EmbeddingUnavailable as e:
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Error building semantic index: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def find_similar_notes(
+    note_id: str,
+    limit: int = 10,
+    min_score: float = 0.3,
+) -> Dict[str, Any]:
+    """Find notes whose content resembles a given note.
+
+    Use after landing on a relevant note to find the rest of the thinking on
+    the same subject, including notes that share no vocabulary with it.
+
+    Args:
+        note_id: Note to compare against
+        limit: Maximum number of notes to return (default: 10)
+        min_score: Cosine similarity floor, 0 to 1 (default: 0.3)
+
+    Returns:
+        Dictionary containing the similar notes found
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        index = get_index()
+        if index is None or index.chunk_count == 0:
+            return {"error": "No semantic index yet. Call build_semantic_index first."}
+
+        notebook_paths = get_notebook_paths(api)
+        hits = similar_notes(index, note_id, limit=limit, threshold=min_score)
+        return {
+            "status": "success",
+            "total": len(hits),
+            "notes": [
+                _shape_hit(
+                    hit["id"], hit["title"], hit["chunk"][:SEARCH_SNIPPET_CHARS],
+                    hit.get("parent_id", ""), _iso_stamp(hit.get("updated")),
+                    "semantic", hit["score"], False, notebook_paths,
+                )
+                for hit in hits
+            ],
+        }
+    except KeyError:
+        return {"error": f"Note {note_id} is not in the semantic index"}
+    except Exception as e:
+        logger.error(f"Error finding similar notes: {e}")
         return {"error": str(e)}
 
 
@@ -172,6 +371,9 @@ async def find_linked_notes(
     depth: int = 1,
     limit: int = 50,
     refresh: bool = False,
+    include_semantic: bool = False,
+    semantic_fanout: int = 5,
+    semantic_min_score: float = 0.45,
 ) -> Dict[str, Any]:
     """Find notes connected to a note by Joplin's internal links.
 
@@ -184,6 +386,13 @@ async def find_linked_notes(
     on whichever results are worth reading, so unrelated note bodies stay out
     of the conversation.
 
+    Set include_semantic to also walk similarity edges. Off by default because
+    at depth 1 it returns what find_similar_notes already returns, only with
+    more moving parts. It earns its keep at depth 2 or more, where it reaches
+    notes related to what this note is related to - genuine transitive
+    association that no single query expresses, at the cost of drifting off
+    topic the further it goes.
+
     Args:
         note_id: ID of the note to start from
         direction: "out" for links this note makes, "in" for links back to it,
@@ -191,6 +400,9 @@ async def find_linked_notes(
         depth: How many hops to follow, 1-3 (default: 1)
         limit: Maximum number of linked notes to return (default: 50)
         refresh: Rebuild the link graph instead of using the cached one
+        include_semantic: Also traverse similarity edges (default: False)
+        semantic_fanout: Similarity edges per note when enabled (default: 5)
+        semantic_min_score: Similarity floor for those edges (default: 0.45)
 
     Returns:
         Dictionary containing the origin note and the linked notes found
@@ -200,8 +412,25 @@ async def find_linked_notes(
 
     try:
         graph = get_link_graph(api, refresh=refresh)
+        provider = None
+
+        if include_semantic:
+            index = get_index()
+            if index is None or index.chunk_count == 0:
+                return {"error": "include_semantic needs an index. Call build_semantic_index."}
+
+            def provider(current: str) -> Dict[str, float]:  # noqa: F811
+                try:
+                    hits = similar_notes(
+                        index, current, limit=semantic_fanout, threshold=semantic_min_score,
+                    )
+                except KeyError:
+                    return {}
+                return {hit["id"]: hit["score"] for hit in hits}
+
         result = find_neighbours(
             graph, note_id=note_id, direction=direction, depth=depth, limit=limit,
+            semantic_provider=provider,
         )
         return {"status": "success", **result}
     except KeyError:
