@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.joplin.joplin_api import JoplinAPI, JoplinNotebook, JoplinNote, OrderDirection
+from src.joplin.joplin_links import find_neighbours, get_link_graph
 from src.joplin.joplin_utils import get_token_from_env, get_base_url_from_env, MarkdownContent
 
 # Initialize FastMCP server
@@ -137,6 +138,54 @@ async def search_notes(query: str, limit: int = 100) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Error searching notes: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def find_linked_notes(
+    note_id: str,
+    direction: str = "both",
+    depth: int = 1,
+    limit: int = 50,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Find notes connected to a note by Joplin's internal links.
+
+    Answers both "what does this note link to" and "what links back to this
+    note". Joplin's own search cannot do the latter at all, so this is the way
+    to find the notes that reference something without knowing their wording.
+
+    Useful after a search has surfaced one good note, to pull in the notes
+    around it. Returns identifiers, titles and notebooks only - call get_note
+    on whichever results are worth reading, so unrelated note bodies stay out
+    of the conversation.
+
+    Args:
+        note_id: ID of the note to start from
+        direction: "out" for links this note makes, "in" for links back to it,
+            "both" to ignore direction (default: "both")
+        depth: How many hops to follow, 1-3 (default: 1)
+        limit: Maximum number of linked notes to return (default: 50)
+        refresh: Rebuild the link graph instead of using the cached one
+
+    Returns:
+        Dictionary containing the origin note and the linked notes found
+    """
+    if not api:
+        return {"error": "Joplin API client not initialized"}
+
+    try:
+        graph = get_link_graph(api, refresh=refresh)
+        result = find_neighbours(
+            graph, note_id=note_id, direction=direction, depth=depth, limit=limit,
+        )
+        return {"status": "success", **result}
+    except KeyError:
+        return {"error": f"Note {note_id} was not found"}
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Error finding linked notes: {e}")
         return {"error": str(e)}
 
 

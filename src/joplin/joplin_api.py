@@ -1,6 +1,7 @@
 """Joplin API client implementation."""
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -164,7 +165,13 @@ class JoplinNote:
                 is_todo=data.get("is_todo", False),
                 todo_due=todo_due,
                 todo_completed=todo_completed,
-                source=data.get("source")
+                source=data.get("source"),
+                # These were parsed above but never passed through, so every
+                # note came back detached from its notebook and without the
+                # user-facing timestamps.
+                user_created_time=user_created_time,
+                user_updated_time=user_updated_time,
+                parent_id=data.get("parent_id"),
             )
 
         except Exception as e:
@@ -245,15 +252,35 @@ class JoplinAPI:
     Reference: https://joplinapp.org/help/api/references/rest_api/
     """
 
-    def __init__(self, token: str, base_url: str = "http://localhost:41184"):
+    # Default per-request timeout (connect, read) in seconds. Without a
+    # timeout, requests blocks forever; when Joplin briefly locks its DB
+    # during its own sync cycle, a call hangs indefinitely and surfaces in
+    # MCP clients as "Calling Joplin" stuck for minutes. Override via the
+    # JOPLIN_TIMEOUT env var (read seconds).
+    DEFAULT_TIMEOUT: float = 20.0
+
+    def __init__(
+        self,
+        token: str,
+        base_url: str = "http://localhost:41184",
+        timeout: float | None = None,
+    ):
         """Initialize the API client.
 
         Args:
             token: API token for authentication
             base_url: Base URL for the Joplin API
+            timeout: Per-request read timeout in seconds. Falls back to the
+                JOPLIN_TIMEOUT env var, then DEFAULT_TIMEOUT.
         """
         self.token = token
         self.base_url = base_url.rstrip("/")
+        if timeout is None:
+            try:
+                timeout = float(os.getenv("JOPLIN_TIMEOUT", self.DEFAULT_TIMEOUT))
+            except (TypeError, ValueError):
+                timeout = self.DEFAULT_TIMEOUT
+        self.timeout = timeout
 
     def _make_request(
         self,
@@ -291,11 +318,17 @@ class JoplinAPI:
                 url,
                 params=params,
                 json=json,
-                headers=headers
+                headers=headers,
+                # (connect, read) timeout. Cap connect at 5s; read uses the
+                # configured timeout so a slow query can't hang forever.
+                timeout=(5, self.timeout),
             )
             response.raise_for_status()
             return response.json()
 
+        except requests.exceptions.Timeout as e:
+            logger.error(f"API request timed out after {self.timeout}s: {e}")
+            raise
         except requests.exceptions.RequestException as e:
             logger.error(f"API request failed: {e}")
             raise
