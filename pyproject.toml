@@ -12,11 +12,24 @@ keywords = ["joplin", "mcp", "note-taking", "ai", "claude"]
 homepage = "https://weigend.studio"
 repository = "https://github.com/dweigend/joplin-mcp"
 dependencies = [
-    "mcp[cli]",
+    # Pinned: FastMCP tool-schema behavior changes between minor releases
+    # (1.x stopped flattening single pydantic-model args). Keep within a known
+    # -good minor so `uv sync`/`uv lock` stay deterministic; bump deliberately.
+    "mcp[cli]>=1.26.0,<1.27.0",
     "httpx",
     "python-dotenv",
     "requests",
-    "pydantic"
+    "pydantic",
+    "uvicorn>=0.34.0",
+    # Semantic search. onnxruntime rather than torch: the model is the same
+    # quantized MiniLM the knowledge-graph plugin bundles, and this keeps the
+    # install to tens of megabytes instead of a gigabyte. Required rather than
+    # optional because the launcher runs a plain `uv sync`, which would prune
+    # an extra on every restart.
+    "numpy>=1.24",
+    # Capped: 1.24+ dropped x86_64 macOS wheels, and this runs on an Intel Mac.
+    "onnxruntime>=1.17,<1.24",
+    "tokenizers>=0.15",
 ]
 
 [project.optional-dependencies]

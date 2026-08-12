@@ -1,6 +1,7 @@
 """Joplin API client implementation."""
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -164,11 +165,82 @@ class JoplinNote:
                 is_todo=data.get("is_todo", False),
                 todo_due=todo_due,
                 todo_completed=todo_completed,
-                source=data.get("source")
+                source=data.get("source"),
+                # These were parsed above but never passed through, so every
+                # note came back detached from its notebook and without the
+                # user-facing timestamps.
+                user_created_time=user_created_time,
+                user_updated_time=user_updated_time,
+                parent_id=data.get("parent_id"),
             )
 
         except Exception as e:
             logger.error(f"Error creating JoplinNote: {e}")
+            raise
+
+@dataclass
+class JoplinNotebook:
+    """Represents a Joplin notebook (folder)."""
+
+    id: str
+    title: str
+    parent_id: str | None = None
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+    user_created_time: datetime | None = None
+    user_updated_time: datetime | None = None
+    is_shared: bool = False
+    share_id: str | None = None
+    children: list["JoplinNotebook"] | None = None
+
+    @classmethod
+    def from_api_response(cls, data: dict[str, Any]) -> "JoplinNotebook":
+        """Create a JoplinNotebook instance from API response data."""
+        try:
+            logger.debug(f"Creating JoplinNotebook from API data: {data}")
+
+            if "id" not in data or "title" not in data:
+                msg = f"Missing essential fields (id/title) in API response: {data}"
+                raise ValueError(msg)
+
+            created_time = (
+                datetime.fromtimestamp(data["created_time"] / 1000)
+                if data.get("created_time")
+                else None
+            )
+            updated_time = (
+                datetime.fromtimestamp(data["updated_time"] / 1000)
+                if data.get("updated_time")
+                else None
+            )
+            user_created_time = (
+                datetime.fromtimestamp(data["user_created_time"] / 1000)
+                if data.get("user_created_time")
+                else None
+            )
+            user_updated_time = (
+                datetime.fromtimestamp(data["user_updated_time"] / 1000)
+                if data.get("user_updated_time")
+                else None
+            )
+
+            return cls(
+                id=data["id"],
+                title=data["title"],
+                parent_id=data.get("parent_id"),
+                created_time=created_time,
+                updated_time=updated_time,
+                user_created_time=user_created_time,
+                user_updated_time=user_updated_time,
+                is_shared=bool(data.get("is_shared", False)),
+                share_id=data.get("share_id"),
+                children=[
+                    cls.from_api_response(child)
+                    for child in data.get("children", [])
+                ],
+            )
+        except Exception as e:
+            logger.error(f"Error creating JoplinNotebook: {e}")
             raise
 
 class JoplinAPI:
@@ -180,15 +252,35 @@ class JoplinAPI:
     Reference: https://joplinapp.org/help/api/references/rest_api/
     """
 
-    def __init__(self, token: str, base_url: str = "http://localhost:41184"):
+    # Default per-request timeout (connect, read) in seconds. Without a
+    # timeout, requests blocks forever; when Joplin briefly locks its DB
+    # during its own sync cycle, a call hangs indefinitely and surfaces in
+    # MCP clients as "Calling Joplin" stuck for minutes. Override via the
+    # JOPLIN_TIMEOUT env var (read seconds).
+    DEFAULT_TIMEOUT: float = 20.0
+
+    def __init__(
+        self,
+        token: str,
+        base_url: str = "http://localhost:41184",
+        timeout: float | None = None,
+    ):
         """Initialize the API client.
 
         Args:
             token: API token for authentication
             base_url: Base URL for the Joplin API
+            timeout: Per-request read timeout in seconds. Falls back to the
+                JOPLIN_TIMEOUT env var, then DEFAULT_TIMEOUT.
         """
         self.token = token
         self.base_url = base_url.rstrip("/")
+        if timeout is None:
+            try:
+                timeout = float(os.getenv("JOPLIN_TIMEOUT", self.DEFAULT_TIMEOUT))
+            except (TypeError, ValueError):
+                timeout = self.DEFAULT_TIMEOUT
+        self.timeout = timeout
 
     def _make_request(
         self,
@@ -226,11 +318,17 @@ class JoplinAPI:
                 url,
                 params=params,
                 json=json,
-                headers=headers
+                headers=headers,
+                # (connect, read) timeout. Cap connect at 5s; read uses the
+                # configured timeout so a slow query can't hang forever.
+                timeout=(5, self.timeout),
             )
             response.raise_for_status()
             return response.json()
 
+        except requests.exceptions.Timeout as e:
+            logger.error(f"API request timed out after {self.timeout}s: {e}")
+            raise
         except requests.exceptions.RequestException as e:
             logger.error(f"API request failed: {e}")
             raise
@@ -375,13 +473,17 @@ class JoplinAPI:
     def search_notes(
         self,
         query: str,
-        limit: int = 100
+        limit: int = 100,
+        fields: list[str] | None = None
     ) -> PaginatedResponse[JoplinNote]:
         """Search for notes.
 
         Args:
             query: Search query string
             limit: Maximum number of results
+            fields: Fields to return. The search endpoint sends only id and
+                title unless asked, so body and timestamps come back empty
+                when this is omitted.
 
         Returns:
             PaginatedResponse containing matching JoplinNote objects
@@ -390,8 +492,44 @@ class JoplinAPI:
             "query": query,
             "limit": limit
         }
+
+        if fields:
+            params["fields"] = ",".join(fields)
         response = self._make_request("GET", "search", params=params)
         return PaginatedResponse(
             items=[JoplinNote.from_api_response(item) for item in response["items"]],
             has_more=response["has_more"]
         )
+
+    def list_notebooks(
+        self,
+        fields: list[str] | None = None
+    ) -> list[JoplinNotebook]:
+        """Get all notebooks as a tree."""
+        params = {}
+
+        if fields:
+            params["fields"] = ",".join(fields)
+
+        response = self._make_request("GET", "folders", params=params)
+
+        if isinstance(response, dict) and "items" in response:
+            items = response["items"]
+        else:
+            items = response
+
+        return [JoplinNotebook.from_api_response(item) for item in items]
+
+    def create_notebook(
+        self,
+        title: str,
+        parent_id: str | None = None
+    ) -> JoplinNotebook:
+        """Create a new notebook."""
+        data = {"title": title}
+
+        if parent_id is not None:
+            data["parent_id"] = parent_id
+
+        response = self._make_request("POST", "folders", json=data)
+        return JoplinNotebook.from_api_response(response)
