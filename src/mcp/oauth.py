@@ -15,6 +15,7 @@ all authorization-server concerns; a resource server never sees them.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -145,6 +146,7 @@ class OAuthConfig:
     """Resource server configuration, already normalized."""
 
     enabled: bool = False
+    static_token: str = ""
     issuer: str = ""
     server_url: str = ""
     mcp_path: str = "/mcp"
@@ -152,10 +154,25 @@ class OAuthConfig:
     jwks_cache_ttl: int = 3600
     groups: GroupPolicy = field(default_factory=GroupPolicy)
 
+    @property
+    def mode(self) -> str:
+        """Which gate is in force.
+
+        A static token wins outright rather than being accepted alongside OAuth.
+        Two ways in means the weaker one sets the real security level, and a
+        server whose posture depends on which credential the caller happened to
+        present is not one anybody can reason about.
+        """
+        if self.static_token:
+            return "static"
+
+        return "oauth" if self.enabled else "open"
+
     @classmethod
     def from_env(cls) -> "OAuthConfig":
         return cls(
             enabled=_env_bool("MCP_OAUTH_ENABLED", False),
+            static_token=_env_str("MCP_STATIC_TOKEN"),
             issuer=_env_str("MCP_OAUTH_ISSUER").rstrip("/"),
             server_url=_env_str("MCP_SERVER_URL").rstrip("/"),
             mcp_path="/" + _env_str("MCP_PATH", "/mcp").strip("/"),
@@ -174,6 +191,17 @@ class OAuthConfig:
 
     def validate(self) -> None:
         """Refuse to start misconfigured rather than serving an open endpoint."""
+        if self.mode == "static":
+            # Short shared secrets are the failure mode here: the token never
+            # expires and never rotates, so it gets as many guesses as the
+            # internet cares to spend.
+            if len(self.static_token) < 32:
+                raise OAuthConfigError(
+                    "MCP_STATIC_TOKEN must be at least 32 characters; generate "
+                    "one with: openssl rand -hex 32"
+                )
+            return
+
         if not self.enabled:
             return
 
@@ -345,22 +373,29 @@ class AuthMiddleware:
     MCP framing happens, and so long-lived SSE responses are not buffered.
     """
 
-    def __init__(self, app, config: OAuthConfig, verifier: TokenVerifier):
+    def __init__(self, app, config: OAuthConfig,
+                 verifier: TokenVerifier | None = None):
         self.app = app
         self.config = config
         self.verifier = verifier
 
     def _challenge_header(self, error: str = "", description: str = "") -> bytes:
-        parts = [
-            f'resource_metadata="{self.config.metadata_url}"',
-            f'scope="{" ".join(REQUIRED_SCOPES)}"',
-        ]
+        # In static-token mode there is no authorization server to discover, so
+        # advertising a resource_metadata pointer would send a client off to
+        # start an OAuth flow that cannot succeed.
+        if self.config.mode == "static":
+            parts = []
+        else:
+            parts = [
+                f'resource_metadata="{self.config.metadata_url}"',
+                f'scope="{" ".join(REQUIRED_SCOPES)}"',
+            ]
 
         if error:
             parts.append(f'error="{error}"')
             parts.append(f'error_description="{description}"')
 
-        return ("Bearer " + ", ".join(parts)).encode()
+        return ("Bearer " + ", ".join(parts) if parts else "Bearer").encode()
 
     async def _challenge(self, send, error: str = "unauthorized",
                          description: str = "authentication required") -> None:
@@ -389,6 +424,23 @@ class AuthMiddleware:
         token = _bearer_token(scope)
         if not token:
             await self._challenge(send)
+            return
+
+        if self.config.mode == "static":
+            # Constant-time, so a wrong token cannot be narrowed down by timing.
+            if not hmac.compare_digest(token, self.config.static_token):
+                logger.warning("STATIC_TOKEN_REJECTED")
+                await self._challenge(
+                    send, "invalid_token", "the access token is not valid"
+                )
+                return
+
+            # No identity in a shared secret, so no group policy to apply. What
+            # the caller may do is whatever the server-level tool policy already
+            # allows — JOPLIN_READ_ONLY still narrows it.
+            logger.info("STATIC_TOKEN_ACCEPTED permission=%s", PERMISSION_WRITE)
+            scope[SCOPE_PERMISSION_KEY] = PERMISSION_WRITE
+            await self.app(scope, receive, send)
             return
 
         try:

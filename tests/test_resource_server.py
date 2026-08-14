@@ -15,6 +15,12 @@ os.environ.update(
     MCP_READ_GROUPS="joplin-readers",
     MCP_WRITE_GROUPS=" joplin-admins ,  ",      # deliberate junk
     MCP_HOST="127.0.0.1", MCP_PORT=str(MCP_PORT),
+    # 0 makes the discovery cache expire before every single request, so the
+    # whole suite runs through the JWKS-refresh path. That path once threw away
+    # the warm key client and rejected every token arriving during the swap,
+    # which clients read as "token expired" and answered with a browser window
+    # each. Exercising it everywhere is cheap against a local mock issuer.
+    MCP_OAUTH_JWKS_CACHE_TTL="0",
 )
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
@@ -182,6 +188,22 @@ print("\n[7] space-delimited groups claim")
 st = mint("joplin-readers extra")
 r, sid = session(st)
 check("string groups claim accepted", r.status_code == 200, str(r.status_code))
+
+print("\n[8] concurrent burst across a JWKS cache refresh")
+import concurrent.futures
+bt = mint(["joplin-admins"])
+
+
+def one_call(_):
+    return httpx.post(f"{SERVER_URL}/mcp",
+                      headers={**H, "Authorization": f"Bearer {bt}"},
+                      json=INIT, timeout=20).status_code
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
+    codes = list(ex.map(one_call, range(12)))
+check("12 simultaneous valid tokens all accepted", set(codes) == {200},
+      f"got {sorted(set(codes))} -> {codes.count(401)} spurious 401s")
 
 print(f"\n{'='*46}\n  {ok} passed, {fail} failed\n{'='*46}")
 sys.exit(1 if fail else 0)

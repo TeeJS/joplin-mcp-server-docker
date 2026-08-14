@@ -652,13 +652,31 @@ def build_app():
         return JSONResponse({
             "status": "ok",
             "service": "joplin-mcp",
-            "oauth": config.enabled,
+            "auth": config.mode,
+            "oauth": config.mode == "oauth",
         })
 
     # Outside the gate, so the container healthcheck survives turning auth on.
     app.router.routes.insert(0, Route(oauth.HEALTH_PATH, healthz, methods=["GET"]))
 
-    if config.enabled:
+    if config.mode == "static":
+        # No discovery documents: there is no authorization server, and
+        # publishing a pointer to one would send clients into a flow that
+        # cannot complete.
+        app.add_middleware(oauth.AuthMiddleware, config=config)
+
+        logger.info(
+            "Static bearer token enabled (%d chars). No user identity in a "
+            "shared secret, so group policy does not apply; JOPLIN_READ_ONLY=%s "
+            "is the only narrowing in force.",
+            len(config.static_token), JOPLIN_READ_ONLY,
+        )
+        if config.enabled:
+            logger.warning(
+                "MCP_OAUTH_ENABLED is set but MCP_STATIC_TOKEN takes precedence "
+                "— OAuth is NOT in use. Unset MCP_STATIC_TOKEN to go back to it."
+            )
+    elif config.enabled:
         verifier = oauth.TokenVerifier(config)
 
         for route in reversed(oauth.build_routes(config, verifier)):
@@ -687,9 +705,9 @@ def build_app():
             )
     else:
         logger.warning(
-            "OAuth is DISABLED. Anyone who can reach %s:%s has full use of the "
-            "Joplin token. Only acceptable when the endpoint is unreachable by "
-            "untrusted callers.",
+            "No authentication configured. Anyone who can reach %s:%s has full "
+            "use of the Joplin token. Set MCP_STATIC_TOKEN or MCP_OAUTH_ENABLED "
+            "before this endpoint is reachable by untrusted callers.",
             MCP_HOST, MCP_PORT,
         )
 

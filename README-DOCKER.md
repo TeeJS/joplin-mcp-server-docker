@@ -40,6 +40,50 @@ check, so symlinks and `..` cannot escape the root.
 and still moves notes to the Joplin trash, where they can be recovered;
 `permanent=true` is refused rather than silently downgraded.
 
+## Authentication: pick one
+
+| Posture | Set | Good for |
+| ------- | --- | -------- |
+| **Static bearer token** | `MCP_STATIC_TOKEN` | One operator, many clients. No expiry, no refresh, no prompts. |
+| **OAuth 2.1** | `MCP_OAUTH_ENABLED=true` + issuer | Per-user identity and a read/write split. |
+| None | neither | Only when nothing untrusted can reach the port. |
+
+`MCP_STATIC_TOKEN` **wins if both are set.** Two ways in means the weaker one
+sets the real security level, so the server picks one and logs which.
+
+### Static bearer token
+
+```bash
+MCP_STATIC_TOKEN=$(openssl rand -hex 32)
+```
+
+Clients send it as a normal header. With `mcp-remote`:
+
+```json
+"args": ["/c","npx","mcp-remote","https://<host>/mcp",
+         "--header","Authorization: Bearer <token>"]
+```
+
+Minimum 32 characters — the server refuses to start with less, because a token
+that never expires gets as many guesses as the internet cares to spend.
+
+**Why you might prefer this to OAuth.** OAuth access tokens expire, and the
+refresh that replaces them is single-use in providers that follow RFC 9700
+(Authelia among them). Several clients sharing one refresh token will race at
+expiry; the first wins and the rest get an invalid-token error, fall back to a
+full authorization, and pop a login window each. A static token has no refresh
+to fail.
+
+**What you give up.** There is no identity in a shared secret, so
+`MCP_READ_GROUPS` / `MCP_WRITE_GROUPS` do not apply and every caller gets every
+exposed tool. To restrict, use `JOPLIN_READ_ONLY=true`, which still narrows.
+Rotating means changing the value on the server and in every client, and the
+token sits in plaintext in client configs.
+
+The server publishes no `.well-known` documents in this mode and its `401` does
+not carry a `resource_metadata` pointer — there is no authorization server to
+discover, and advertising one would send clients into a flow that cannot finish.
+
 ## Authentication (OAuth 2.1)
 
 | Variable                   | Required | Default   | Notes                                                                        |
