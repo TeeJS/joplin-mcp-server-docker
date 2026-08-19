@@ -40,7 +40,7 @@ EXPOSE 8000
 
 # /healthz stays outside the auth gate specifically so this keeps working once
 # MCP_OAUTH_ENABLED is turned on.
-# Shell form, so MCP_PORT is expanded at runtime rather than baked in.
+# Exec form; MCP_PORT is read at runtime inside Python (os.environ), not baked in.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MCP_PORT','8000')+'/healthz', timeout=4).status == 200 else 1)"
 

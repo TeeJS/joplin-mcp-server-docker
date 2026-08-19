@@ -5,11 +5,33 @@ services:
     container_name: joplin-mcp
     restart: unless-stopped
     ports:
+      # Binds 0.0.0.0 by default. If a reverse proxy terminates in front of
+      # this, prefer "127.0.0.1:8000:8000" so nothing else on the LAN can reach
+      # the endpoint directly, bypassing the proxy's auth.
       - "8000:8000"
+    # Drop every capability and block privilege escalation. This server binds an
+    # unprivileged port and needs no Linux capabilities at all.
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
     environment:
       JOPLIN_TOKEN: "${JOPLIN_TOKEN:?set JOPLIN_TOKEN in a .env file next to this compose file}"
       JOPLIN_HOST: "${JOPLIN_HOST:-host.docker.internal}"
       JOPLIN_PORT: "${JOPLIN_PORT:-41184}"
       MCP_PORT: "8000"
+      # This compose runs the server WITHOUT authentication — fine on a trusted
+      # LAN. Before exposing it to untrusted callers, set one of these (see
+      # README-DOCKER.md): a static bearer token or full OAuth.
+      # MCP_STATIC_TOKEN: "${MCP_STATIC_TOKEN:?generate one: openssl rand -hex 32}"
+    # The semantic index is written here; a named volume persists it across
+    # restarts so it is not rebuilt every start. Keeping this writable also lets
+    # you add `read_only: true` above (with `tmpfs: [/tmp]`) to lock the rest of
+    # the filesystem, since a volume mount stays writable under read_only.
+    volumes:
+      - joplin-mcp-cache:/home/joplin/.cache
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+volumes:
+  joplin-mcp-cache:
