@@ -144,9 +144,16 @@ class JoplinMCPTests(unittest.IsolatedAsyncioTestCase):
             file_path = Path(tmp_dir) / "note.md"
             file_path.write_text("# Imported Note\n\nBody text", encoding="utf-8")
 
-            result = await joplin_mcp.import_markdown(
-                file_path=str(file_path), notebook_name="Work"
-            )
+            # Markdown import is gated behind JOPLIN_IMPORT_ROOT on this fork;
+            # point it at the temp dir so the file is inside the allowed root.
+            original_root = joplin_mcp.JOPLIN_IMPORT_ROOT
+            joplin_mcp.JOPLIN_IMPORT_ROOT = tmp_dir
+            try:
+                result = await joplin_mcp.import_markdown(
+                    file_path=str(file_path), notebook_name="Work"
+                )
+            finally:
+                joplin_mcp.JOPLIN_IMPORT_ROOT = original_root
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(fake_api.created_note_calls[0]["title"], "Imported Note")
