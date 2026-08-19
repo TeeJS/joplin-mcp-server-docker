@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -158,30 +159,38 @@ class VectorIndex:
 _embedder: Embedder | None = None
 _index: VectorIndex | None = None
 _index_loaded = False
+# Guards the lazy init of the globals above. Once the tool layer offloads the
+# heavy calls to a thread pool, these are touched from more than one thread, so
+# the read-check-assign in each accessor needs to be atomic. RLock so a caller
+# already holding it can re-enter without deadlock.
+_lock = threading.RLock()
 
 
 def get_embedder() -> Embedder:
     """The process-wide embedder, loaded on first use (about 5s)."""
     global _embedder
-    if _embedder is None:
-        _embedder = Embedder()
-    return _embedder
+    with _lock:
+        if _embedder is None:
+            _embedder = Embedder()
+        return _embedder
 
 
 def get_index() -> VectorIndex | None:
     """The cached index, read from disk once. None when never built."""
     global _index, _index_loaded
-    if not _index_loaded:
-        _index = load_index()
-        _index_loaded = True
-    return _index
+    with _lock:
+        if not _index_loaded:
+            _index = load_index()
+            _index_loaded = True
+        return _index
 
 
 def set_index(index: VectorIndex | None) -> None:
     """Install an index as the current one, e.g. straight after a build."""
     global _index, _index_loaded
-    _index = index
-    _index_loaded = True
+    with _lock:
+        _index = index
+        _index_loaded = True
 
 
 def reset_runtime() -> None:

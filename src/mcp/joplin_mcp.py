@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from pathlib import Path
 
+import anyio
 from mcp import types
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
@@ -339,6 +340,16 @@ async def search_notes(
     keyword_weight = max(0.0, min(float(keyword_weight), 1.0))
     snippet_chars = max(0, min(int(snippet_chars), MAX_SNIPPET_CHARS))
 
+    # Keyword search hits the network and semantic search embeds the query and
+    # multiplies the index matrix; both block. Run off the event loop.
+    return await anyio.to_thread.run_sync(
+        _search_notes_sync, query, limit, mode, keyword_weight, snippet_chars
+    )
+
+
+def _search_notes_sync(
+    query: str, limit: int, mode: str, keyword_weight: float, snippet_chars: int
+) -> Dict[str, Any]:
     try:
         notebook_paths = get_notebook_paths(api)
         notes: list[Dict[str, Any]] = []
@@ -443,6 +454,12 @@ async def build_semantic_index(rebuild: bool = False) -> Dict[str, Any]:
     if not api:
         return {"error": "Joplin API client not initialized"}
 
+    # Embedding every note is seconds of pure CPU; run it off the event loop so
+    # it does not stall every other in-flight request.
+    return await anyio.to_thread.run_sync(_build_semantic_index_sync, rebuild)
+
+
+def _build_semantic_index_sync(rebuild: bool) -> Dict[str, Any]:
     try:
         previous = None if rebuild else get_index()
         index = build_index(api, get_embedder(), previous=previous)
@@ -485,6 +502,16 @@ async def find_similar_notes(
     limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
     min_score = max(0.0, min(float(min_score), 1.0))
 
+    # The similarity matrix multiply plus per-chunk scan is CPU-bound; keep it
+    # off the event loop.
+    return await anyio.to_thread.run_sync(
+        _find_similar_notes_sync, note_id, limit, min_score
+    )
+
+
+def _find_similar_notes_sync(
+    note_id: str, limit: int, min_score: float
+) -> Dict[str, Any]:
     try:
         index = get_index()
         if index is None or index.chunk_count == 0:
@@ -563,6 +590,19 @@ async def find_linked_notes(
     semantic_fanout = max(1, min(int(semantic_fanout), 20))
     semantic_min_score = max(0.0, min(float(semantic_min_score), 1.0))
 
+    # Building the graph pulls every note body, and include_semantic runs a
+    # similarity search per visited node — both blocking. Run off-thread.
+    return await anyio.to_thread.run_sync(
+        _find_linked_notes_sync,
+        note_id, direction, depth, limit, refresh,
+        include_semantic, semantic_fanout, semantic_min_score,
+    )
+
+
+def _find_linked_notes_sync(
+    note_id: str, direction: str, depth: int, limit: int, refresh: bool,
+    include_semantic: bool, semantic_fanout: int, semantic_min_score: float,
+) -> Dict[str, Any]:
     try:
         graph = get_link_graph(api, refresh=refresh)
         provider = None
