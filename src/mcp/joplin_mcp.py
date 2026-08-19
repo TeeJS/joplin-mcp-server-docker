@@ -70,6 +70,12 @@ READ_TOOLS = frozenset({
     "get_note",
     "list_tags",
     "get_note_tags",
+    # Read-only lookups added with the upstream merge: they only read notes and
+    # links, never mutate. build_semantic_index is deliberately excluded — it
+    # writes an index and is expensive, so it stays a write-gated tool.
+    "list_notebooks",
+    "find_similar_notes",
+    "find_linked_notes",
 })
 
 # Disables every tool outside READ_TOOLS. Server-level, so no future group

@@ -350,8 +350,13 @@ class JoplinAPI:
             return response.json()
 
         except requests.exceptions.Timeout as e:
-            logger.error(f"API request timed out after {self.timeout}s: {e}")
-            raise
+            # A connect timeout (ConnectTimeout subclasses Timeout, so it lands
+            # here first) carries the full request URL, token query parameter
+            # included. Redact before it reaches the log or the MCP client, the
+            # same as the general RequestException branch below.
+            message = self._redact(str(e))
+            logger.error("API request timed out after %ss: %s", self.timeout, message)
+            raise JoplinAPIError(message) from None
         except requests.exceptions.RequestException as e:
             # Re-raise with the token stripped. The original exception carries
             # the full request URL, token query parameter included, and it flows
