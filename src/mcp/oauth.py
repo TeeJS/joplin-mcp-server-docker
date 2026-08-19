@@ -428,7 +428,14 @@ class AuthMiddleware:
 
         if self.config.mode == "static":
             # Constant-time, so a wrong token cannot be narrowed down by timing.
-            if not hmac.compare_digest(token, self.config.static_token):
+            # Compare as bytes: hmac.compare_digest raises TypeError on a str
+            # holding non-ASCII, and the token was decoded latin-1, so a client
+            # sending a high-bit byte would otherwise crash the gate to a 500
+            # instead of a clean 401.
+            if not hmac.compare_digest(
+                token.encode("utf-8", "replace"),
+                self.config.static_token.encode("utf-8", "replace"),
+            ):
                 logger.warning("STATIC_TOKEN_REJECTED")
                 await self._challenge(
                     send, "invalid_token", "the access token is not valid"

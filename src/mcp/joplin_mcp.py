@@ -252,6 +252,10 @@ def resolve_import_path(raw_path: str) -> Path:
 SEARCH_FIELDS = ["id", "title", "body", "parent_id", "updated_time", "is_todo"]
 SEARCH_SNIPPET_CHARS = 200
 SEARCH_MODES = ("hybrid", "keyword", "semantic")
+# Upper bounds on caller-supplied sizing, so one request can't ask for an
+# unbounded result set or excerpt.
+MAX_SEARCH_LIMIT = 200
+MAX_SNIPPET_CHARS = 2000
 # Fusion needs more candidates per side than it returns, or a note ranked well
 # by one side but just outside the other's cut-off can never be promoted.
 CANDIDATE_MULTIPLIER = 3
@@ -326,6 +330,14 @@ async def search_notes(
         return {"error": "Joplin API client not initialized"}
     if mode not in SEARCH_MODES:
         return {"error": f"mode must be one of {', '.join(SEARCH_MODES)}"}
+
+    # Clamp caller-supplied knobs. limit feeds limit*CANDIDATE_MULTIPLIER into
+    # the embedding search, and keyword_weight>1 makes (1-weight) negative in
+    # the fusion, so an out-of-range value produces garbage ranking or a heavy
+    # query rather than an error.
+    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    keyword_weight = max(0.0, min(float(keyword_weight), 1.0))
+    snippet_chars = max(0, min(int(snippet_chars), MAX_SNIPPET_CHARS))
 
     try:
         notebook_paths = get_notebook_paths(api)
@@ -470,6 +482,9 @@ async def find_similar_notes(
     if not api:
         return {"error": "Joplin API client not initialized"}
 
+    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    min_score = max(0.0, min(float(min_score), 1.0))
+
     try:
         index = get_index()
         if index is None or index.chunk_count == 0:
@@ -541,6 +556,12 @@ async def find_linked_notes(
     """
     if not api:
         return {"error": "Joplin API client not initialized"}
+
+    # depth and limit are clamped inside find_neighbours; bound the semantic
+    # fan-out here so include_semantic can't request an oversized similarity
+    # search per visited node.
+    semantic_fanout = max(1, min(int(semantic_fanout), 20))
+    semantic_min_score = max(0.0, min(float(semantic_min_score), 1.0))
 
     try:
         graph = get_link_graph(api, refresh=refresh)
@@ -1001,13 +1022,17 @@ def permission_for_request() -> str:
     try:
         request = mcp._mcp_server.request_context.request
     except LookupError:
+        # No HTTP request at all: stdio transport, which is not gated.
         return oauth.PERMISSION_WRITE
 
     if request is None:
         return oauth.PERMISSION_WRITE
 
+    # There IS an HTTP request. The gate sets this key on every /mcp request
+    # before dispatch, so a missing key means the request reached here without
+    # passing the gate — anomalous. Fail closed rather than granting write.
     return request.scope.get(
-        oauth.SCOPE_PERMISSION_KEY, oauth.PERMISSION_WRITE
+        oauth.SCOPE_PERMISSION_KEY, oauth.PERMISSION_NONE
     )
 
 
@@ -1027,21 +1052,35 @@ def install_tool_gate() -> None:
 
     async def gated_list(req):
         result = await original_list(req)
+        permission = permission_for_request()
 
-        if permission_for_request() != oauth.PERMISSION_READ:
+        if permission == oauth.PERMISSION_WRITE:
             return result
 
-        result.root.tools = [
-            tool for tool in result.root.tools if tool.name in READ_TOOLS
-        ]
+        if permission == oauth.PERMISSION_READ:
+            result.root.tools = [
+                tool for tool in result.root.tools if tool.name in READ_TOOLS
+            ]
+            return result
+
+        # PERMISSION_NONE or anything unexpected: expose nothing. The gate is
+        # explicit about all three levels so an unknown value fails closed
+        # rather than falling through to the write surface.
+        result.root.tools = []
         return result
 
     async def gated_call(req):
         name = req.params.name
+        permission = permission_for_request()
 
-        if permission_for_request() == oauth.PERMISSION_READ \
-                and name not in READ_TOOLS:
-            logger.warning("AUTHZ_TOOL_DENIED tool=%s permission=read", name)
+        allowed = (
+            permission == oauth.PERMISSION_WRITE
+            or (permission == oauth.PERMISSION_READ and name in READ_TOOLS)
+        )
+        if not allowed:
+            logger.warning(
+                "AUTHZ_TOOL_DENIED tool=%s permission=%s", name, permission
+            )
             return types.ServerResult(types.CallToolResult(
                 content=[types.TextContent(
                     type="text",
@@ -1130,6 +1169,15 @@ def build_app():
             logger.warning(
                 "No group policy configured: every authenticated caller gets "
                 "every exposed tool. Set MCP_READ_GROUPS / MCP_WRITE_GROUPS."
+            )
+        if not config.audience:
+            logger.warning(
+                "MCP_OAUTH_AUDIENCE is not set: audience is NOT validated, so "
+                "any token your issuer minted — including one issued to a "
+                "different application whose holder is in a mapped group — is "
+                "accepted here. Set MCP_OAUTH_AUDIENCE to this resource's "
+                "identifier (%s) to bind tokens to this server.",
+                config.resource_url,
             )
     else:
         logger.warning(

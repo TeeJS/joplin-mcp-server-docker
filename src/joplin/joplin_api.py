@@ -3,9 +3,10 @@
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Generic, TypeVar
+from urllib.parse import quote
 
 import requests
 
@@ -13,6 +14,28 @@ import requests
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Joplin sends milliseconds-since-epoch, UTC. Cap the plausible range so a
+# corrupt value can't raise OSError/OverflowError out of a data class and crash
+# the tool; anything outside it is treated as absent.
+_MAX_EPOCH_MS = 10_000_000_000_000  # ~ year 2286
+
+
+def _ms_to_datetime(value: Any) -> datetime | None:
+    """Convert a Joplin millisecond timestamp to a UTC datetime, or None.
+
+    Returns None for a missing, zero, non-numeric, or out-of-range value rather
+    than raising: a single malformed timestamp in an API payload must not take
+    down the whole request.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if value <= 0 or value > _MAX_EPOCH_MS:
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
 
 class JoplinAPIError(Exception):
     """A Joplin API request failed.
@@ -127,37 +150,13 @@ class JoplinNote:
                 msg = f"Missing essential fields (id/title) in API response: {data}"
                 raise ValueError(msg)
 
-            # Convert timestamps to datetime objects
-            created_time = (
-                datetime.fromtimestamp(data["created_time"] / 1000)
-                if data.get("created_time")
-                else None
-            )
-            updated_time = (
-                datetime.fromtimestamp(data["updated_time"] / 1000)
-                if data.get("updated_time")
-                else None
-            )
-            user_created_time = (
-                datetime.fromtimestamp(data["user_created_time"] / 1000)
-                if data.get("user_created_time")
-                else None
-            )
-            user_updated_time = (
-                datetime.fromtimestamp(data["user_updated_time"] / 1000)
-                if data.get("user_updated_time")
-                else None
-            )
-            todo_due = (
-                datetime.fromtimestamp(data["todo_due"] / 1000)
-                if data.get("todo_due")
-                else None
-            )
-            todo_completed = (
-                datetime.fromtimestamp(data["todo_completed"] / 1000)
-                if data.get("todo_completed")
-                else None
-            )
+            # Convert timestamps to UTC datetime objects (None if malformed)
+            created_time = _ms_to_datetime(data.get("created_time"))
+            updated_time = _ms_to_datetime(data.get("updated_time"))
+            user_created_time = _ms_to_datetime(data.get("user_created_time"))
+            user_updated_time = _ms_to_datetime(data.get("user_updated_time"))
+            todo_due = _ms_to_datetime(data.get("todo_due"))
+            todo_completed = _ms_to_datetime(data.get("todo_completed"))
 
             return cls(
                 id=data["id"],
@@ -212,26 +211,10 @@ class JoplinNotebook:
                 msg = f"Missing essential fields (id/title) in API response: {data}"
                 raise ValueError(msg)
 
-            created_time = (
-                datetime.fromtimestamp(data["created_time"] / 1000)
-                if data.get("created_time")
-                else None
-            )
-            updated_time = (
-                datetime.fromtimestamp(data["updated_time"] / 1000)
-                if data.get("updated_time")
-                else None
-            )
-            user_created_time = (
-                datetime.fromtimestamp(data["user_created_time"] / 1000)
-                if data.get("user_created_time")
-                else None
-            )
-            user_updated_time = (
-                datetime.fromtimestamp(data["user_updated_time"] / 1000)
-                if data.get("user_updated_time")
-                else None
-            )
+            created_time = _ms_to_datetime(data.get("created_time"))
+            updated_time = _ms_to_datetime(data.get("updated_time"))
+            user_created_time = _ms_to_datetime(data.get("user_created_time"))
+            user_updated_time = _ms_to_datetime(data.get("user_updated_time"))
 
             return cls(
                 id=data["id"],
@@ -398,8 +381,9 @@ class JoplinAPI:
         response = self._make_request("GET", "notes", params=params)
 
         return PaginatedResponse(
-            items=[JoplinNote.from_api_response(item) for item in response["items"]],
-            has_more=response["has_more"]
+            items=[JoplinNote.from_api_response(item)
+                   for item in response.get("items", [])],
+            has_more=response.get("has_more", False)
         )
 
     def get_note(self, note_id: str) -> JoplinNote:
@@ -418,7 +402,9 @@ class JoplinAPI:
         params = {
             "fields": "id,title,body,created_time,updated_time,is_todo"
         }
-        response = self._make_request("GET", f"notes/{note_id}", params=params)
+        response = self._make_request(
+            "GET", f"notes/{quote(note_id, safe='')}", params=params
+        )
         return JoplinNote.from_api_response(response)
 
     def create_note(
@@ -487,7 +473,9 @@ class JoplinAPI:
         if is_todo is not None:
             data["is_todo"] = is_todo
 
-        response = self._make_request("PUT", f"notes/{note_id}", json=data)
+        response = self._make_request(
+            "PUT", f"notes/{quote(note_id, safe='')}", json=data
+        )
         return JoplinNote.from_api_response(response)
 
     def delete_note(self, note_id: str, permanent: bool = False) -> None:
@@ -497,25 +485,33 @@ class JoplinAPI:
             note_id: ID of note to delete
             permanent: If True, permanently delete the note
         """
-        endpoint = f"notes/{note_id}"
-        if permanent:
-            endpoint += "?permanent=1"
-        self._make_request("DELETE", endpoint)
+        endpoint = f"notes/{quote(note_id, safe='')}"
+        # Pass permanent as a query param rather than string-appending "?...",
+        # which would double up if the id ever carried its own query.
+        params = {"permanent": "1"} if permanent else None
+        self._make_request("DELETE", endpoint, params=params)
 
     # ------------------------------------------------------------------ tags
+
+    # A misbehaving or looping backend could report has_more forever; cap the
+    # walk so one call can't spin indefinitely and tie up the worker.
+    MAX_PAGES = 10_000
 
     def _get_all_pages(self, endpoint: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Walk every page of a paginated endpoint and return the concatenated items."""
         params = dict(params or {})
-        page = 1
         out: list[dict[str, Any]] = []
-        while True:
+        for page in range(1, self.MAX_PAGES + 1):
             params["page"] = page
             resp = self._make_request("GET", endpoint, params=params)
             out.extend(resp.get("items", []))
             if not resp.get("has_more"):
                 return out
-            page += 1
+        logger.warning(
+            "Pagination cap of %d pages hit for %s; results may be truncated",
+            self.MAX_PAGES, endpoint,
+        )
+        return out
 
     def list_tags(self) -> list[dict[str, Any]]:
         """Return every tag in Joplin as {id, title} dicts."""
@@ -531,15 +527,22 @@ class JoplinAPI:
 
     def get_note_tags(self, note_id: str) -> list[dict[str, Any]]:
         """Return tags attached to a single note."""
-        return self._get_all_pages(f"notes/{note_id}/tags", params={"fields": "id,title"})
+        return self._get_all_pages(
+            f"notes/{quote(note_id, safe='')}/tags", params={"fields": "id,title"}
+        )
 
     def add_existing_tag_to_note(self, tag_id: str, note_id: str) -> None:
         """Attach an existing tag to a note. Does NOT create the tag."""
-        self._make_request("POST", f"tags/{tag_id}/notes", json={"id": note_id})
+        self._make_request(
+            "POST", f"tags/{quote(tag_id, safe='')}/notes", json={"id": note_id}
+        )
 
     def remove_tag_from_note(self, tag_id: str, note_id: str) -> None:
         """Detach a tag from a note. The tag itself is not deleted."""
-        self._make_request("DELETE", f"tags/{tag_id}/notes/{note_id}")
+        self._make_request(
+            "DELETE",
+            f"tags/{quote(tag_id, safe='')}/notes/{quote(note_id, safe='')}",
+        )
 
     def search_notes(
         self,
@@ -568,8 +571,9 @@ class JoplinAPI:
             params["fields"] = ",".join(fields)
         response = self._make_request("GET", "search", params=params)
         return PaginatedResponse(
-            items=[JoplinNote.from_api_response(item) for item in response["items"]],
-            has_more=response["has_more"]
+            items=[JoplinNote.from_api_response(item)
+                   for item in response.get("items", [])],
+            has_more=response.get("has_more", False)
         )
 
     def list_notebooks(

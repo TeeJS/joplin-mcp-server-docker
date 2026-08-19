@@ -64,14 +64,24 @@ _notebook_cache: tuple[float, dict[str, str]] | None = None
 def flatten_notebook_paths(
     notebooks: Iterable[JoplinNotebook],
     prefix: str | None = None,
+    _visited: set[str] | None = None,
 ) -> dict[str, str]:
     """Map each notebook id to its full slash-separated path."""
     paths: dict[str, str] = {}
+    # Joplin enforces a tree, but a malformed API response with a parent cycle
+    # would otherwise recurse until the stack is exhausted. Skip any id already
+    # on the current path.
+    visited = _visited if _visited is not None else set()
 
     for notebook in notebooks:
+        if notebook.id in visited:
+            continue
+        visited.add(notebook.id)
         path = f"{prefix}/{notebook.title}" if prefix else notebook.title
         paths[notebook.id] = path
-        paths.update(flatten_notebook_paths(notebook.children or [], path))
+        paths.update(
+            flatten_notebook_paths(notebook.children or [], path, visited)
+        )
 
     return paths
 
