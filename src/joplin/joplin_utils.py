@@ -122,6 +122,63 @@ def get_joplin_url_from_env() -> str:
     port = os.environ.get("JOPLIN_PORT", "41184").strip() or "41184"
     return f"http://{host}:{port}"
 
+
+def get_base_url_from_env(env_var: str = "JOPLIN_BASE_URL") -> str:
+    """Read the Joplin API base URL from environment variable.
+
+    Falls back to http://localhost:41184 if not set, which is the default
+    Joplin Web Clipper address. Override with JOPLIN_BASE_URL when running
+    inside a container (e.g. http://host.docker.internal:41184).
+
+    Args:
+        env_var: Name of the environment variable containing the base URL
+
+    Returns:
+        The base URL for the Joplin API
+    """
+    load_dotenv()
+    return os.environ.get(env_var, "").strip() or "http://localhost:41184"
+
+def build_snippet(body: str | None, query: str = "", length: int = 200) -> str:
+    """Extract a short, query-centred excerpt from a note body.
+
+    Windowing on the first query term matters more than it sounds: dated notes
+    all begin with the same header, so a leading excerpt shows the date and
+    nothing about why the note matched.
+
+    Args:
+        body: Note body in Markdown
+        query: Search query whose terms the excerpt should centre on
+        length: Maximum excerpt length in characters
+
+    Returns:
+        Single-line excerpt, elided with a leading/trailing ellipsis where cut
+    """
+    if not body:
+        return ""
+
+    text = " ".join(body.split())
+    if len(text) <= length:
+        return text
+
+    lowered = text.lower()
+    position = -1
+    for term in query.lower().split():
+        term = term.strip('"*')
+        if not term:
+            continue
+        found = lowered.find(term)
+        if found != -1 and (position == -1 or found < position):
+            position = found
+
+    if position == -1:
+        return f"{text[:length].rstrip()}…"
+
+    start = max(0, position - length // 3)
+    excerpt = text[start:start + length].strip()
+    return f"{'…' if start > 0 else ''}{excerpt}…"
+
+
 def format_timestamp(ts: datetime | None) -> str:
     """Format a timestamp for display.
     

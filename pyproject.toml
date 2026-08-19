@@ -25,6 +25,16 @@ dependencies = [
     # Resource-server JWT validation. The crypto extra supplies the RSA/EC
     # backends; without it PyJWT cannot verify RS256 at all.
     "pyjwt[crypto]>=2.8,<3",
+    # Semantic search. onnxruntime rather than torch: the model is the same
+    # quantized MiniLM the knowledge-graph plugin bundles, and this keeps the
+    # install to tens of megabytes instead of a gigabyte. Required rather than
+    # optional because the launcher runs a plain `uv sync`, which would prune
+    # an extra on every restart.
+    "numpy>=1.24",
+    # Capped at <1.24 upstream because 1.24+ dropped x86_64 macOS wheels; the
+    # cap is harmless on the Linux container and keeps parity with upstream.
+    "onnxruntime>=1.17,<1.24",
+    "tokenizers>=0.15",
 ]
 
 [project.optional-dependencies]
