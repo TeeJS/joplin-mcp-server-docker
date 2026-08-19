@@ -15,7 +15,7 @@
   <WebUI></WebUI>
   <TemplateURL/>
   <Icon></Icon>
-  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <ExtraParams>--restart unless-stopped --read-only --tmpfs /tmp --tmpfs /home/joplin/.cache</ExtraParams>
   <PostArgs></PostArgs>
   <CPUset/>
   <DateInstalled/>
